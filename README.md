@@ -7,5 +7,8 @@ file) and the output dir must be specified in the first place.
 
 USAGE
 ------
-bamdst -p <probe.bed> -o . in1.bam
+
+	* bamdst -p <probe.bed> -o . in1.bam
+	* samtools view in1.bam -u | bamdst -p x.bed -o . -
+
 
