@@ -27,20 +27,29 @@
 
 #include "commons.h"
 #include "count.h"
+#include "bedutil.h"
+
+// bam.h and sam_header.h are standard header from samtools
 #include "bam.h"
 #include "sam_header.h"
-#include "bedutil.h"
-#include "khash.h"
+
+// khash, kstring and knetfile are standard utils of klib
+#include "khash.h" 
 #include "kstring.h"
 #include "knetfile.h"
+#include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.0";
+//static char const *Version = "1.0.0";
 
+/* flank region will be stat in the coverage report file,
+ * this value can be set by -f / --flank */
 static int flank_reg = 200;
 
+/* extern bedHand from bedutil.c, it is a collection of functions*/
 extern bedHandle_t *bedHand;
 
+/* We can only support max 20 files or you can self define this value*/
 #if !defined OPEN_MAX && defined NR_OPEN
 # define OPEN_MAX NR_OPEN
 #endif
@@ -55,8 +64,14 @@ static bool stdin_lock = FALSE;
    diminishing performance gains. */
 enum { DEFAULT_MAX_THREADS = 8 };
 
-/* duplicate will be removed if rmdup_mark is TRUE */
-static bool rmdup_mark = FALSE;
+/* duplicate will be removed if rmdup_mark is TRUE 
+ * this option is removed since version 1.0.0
+ */
+// static bool rmdup_mark = FALSE;
+
+static const int WINDOW_SIZE = 64 * 1024;
+// force replace the existed files
+//static bool is_forced = TRUE;
 
 struct opt_aux
   {
@@ -96,7 +111,7 @@ opt_init()
 
 struct depnode
   {
-  unsigned len;
+  unsigned len; // len will be set to 0, if not allocated memory
   unsigned start;
   unsigned stop;
   unsigned *vals;
@@ -112,14 +127,15 @@ void opt_destroy(struct opt_aux *opt)
   freemem(opt);
   }
 
+// debug the depnode list init
 static const char * init_debugmsg[] =
   {
   "Success",
   "Trying to allocated an unempty node",
-  "Trying to allocated a zero memory"
+  "Trying to allocated a zero memory",
   "END of list"
   };
-
+// debug macro, I think it is a good way to find memeory problem
 #define INIT_DEBUG(x) do {						\
  int _a = x;								\
  if(_a)									\
@@ -143,7 +159,7 @@ depnode_init(struct depnode *node)
   memset(node->vals, 0, sizeof *(node->vals));
   memset(node->cnts, 0, sizeof *(node->cnts));
   return 0;
-  };
+  }
 
 /* delete node and make the node point to the next node */
 #define del_node(node) do {						\
@@ -157,6 +173,7 @@ depnode_init(struct depnode *node)
    }									\
  } while(0)
 
+/* construct the bed struct array to a list , return the header node */
 static struct depnode *
 bed_depnode_list(bedreglist_t *bed)
   {
@@ -169,7 +186,11 @@ bed_depnode_list(bedreglist_t *bed)
     node = (struct depnode*)needmem(sizeof(struct depnode));
     node->start = (uint32_t)(bed->a[i] >> 32);
     node->stop = (uint32_t)bed->a[i];
-    node->len = 0; //(uint32_t)bed->a[i] - node->start + 1;
+
+    /* the length of this region should be zero if not allocated memory yet
+    *  Assign the length value when init the vals and cnts */
+    node->len = 0; 
+    
     node->vals = NULL;
     node->cnts = NULL;
     if ( isZero(i)) header = node;
@@ -182,13 +203,28 @@ bed_depnode_list(bedreglist_t *bed)
 
 struct _aux
   {
+  /* nchr,  total num of chromsome
+   * ndata, total num of bam struct
+   * maxdepth, the maxmium of depth */
   int nchr, ndata, maxdep;
+
+  /* tgt_len,  length of target region
+   * flk_len,  length of flank region 
+   * tgt_nreg, total target regions */
   uint64_t tgt_len, flk_len;
   unsigned tgt_nreg;
+
+  /* data, array of bam struct
+   * h,  point to bam header */
   bamFile *data;
   bam_header_t *h;
+
+  /* h_tgt, target bed hash
+   * h_flk, flank bed hash */
   regHash_t *h_tgt;
   regHash_t *h_flk;
+
+  // count struct of depths, insertsize, flank depths, target regions
   count32_t *c_dep;
   count32_t *c_isize;
   count32_t *c_flkdep;
@@ -326,15 +362,17 @@ Ordering options:\n\
 \n");
     /*-d, --rmdup         remove dup reads when calculate depth\n	\*/
       puts ("\
-* Five essential files would be created in the output file :\n\n\
+* Five essential files would be created in the output dir. \n\
+* exon.tsv.gz and depth.tsv.gz are zipped by bgzip, so you can use tabix \n\
+  index these files.\n\n\
  - coverage.report     a report of the coverage information and reads \n\
                        information of whole target regions\n\
- - target.detail       print depth value of each base in fasta-like format\n\
  - cumu.plot           distribution data of depth values\n\
  - insert.plot         distribution data of inferred insert size \n\
  - chromosome.report   coverage information for each chromosome\n\
- - exon.tsv            mean depth, median depth and coverage of each region\n\
+ - region.tsv.gz         mean depth, median depth and coverage of each region\n\
  - depth.tsv.gz        raw depth, rmdup depth, coverage depth of each position\n\
+ - uncover.bed         the bad covered or uncovered region in the probe file\n\
 ");
     }
   exit(EXIT_SUCCESS);
@@ -347,13 +385,14 @@ KSORT_INIT_GENERIC(uint32_t)
 static float median_cal(const uint32_t * array, int l)
   {
   if (isNull(l)) return 0;
-  float med = 0;
+  float med = 0.0;
   uint32_t *tmp;
   tmp = (uint32_t*)needmem(l *sizeof(uint32_t));
   memcpy(tmp, array, l * sizeof(uint32_t));
   ks_introsort(uint32_t, l, tmp);
-  med = l & 1 ? tmp[(l >> 1) + 1] : (float)(tmp[l >> 1] + tmp[(l >> 1) - 1]) / 2;
-  free(tmp);
+  med = l & 1 ? tmp[(l >> 1) + 1] :
+    (float)(tmp[l >> 1] + tmp[(l >> 1) - 1]) / 2;
+  mustfree(tmp);
   return med;
   }
 
@@ -379,6 +418,7 @@ static float coverage_cal(const uint32_t * array, int l)
   return cov;
   }
 
+// ugly report!!! FIXME
 const static char *report_total[] =
   {
   "[Total] Raw Reads (All reads)", "[Total] QC Fail reads",
@@ -462,6 +502,9 @@ int match_pos(struct depnode * header, uint32_t pos)
   return 0;
   }
 
+/* when deal with a read struct, check the begin of this read and the last position 
+ * of this read, if this read is overlap with target region, sum up the depth of
+ * each related position */
 int readcore(struct depnode * header, bam1_t * b)
   {
   struct depnode *tmp = header;
@@ -503,192 +546,283 @@ int readcore(struct depnode * header, bam1_t * b)
   return 0;
   }
 
-int print_tgtdep(char *name, FILE *fp, struct depnode *node, aux_t *a)
+typedef struct
   {
-  if (isNull(node->vals))
-    {
-    errabort("node->vals is null");
-    }
-  int j;
-  float avg, med, cov;
-  avg = avg_cal(node->vals, node->len);
-  med = median_cal(node->vals, node->len);
-  cov = coverage_cal(node->vals, node->len);
-  count_increase(a->c_reg, (int)avg, uint32_t);
-  fprintf(fp, ">%s:%d-%d:NA:NA\t[%.2f,%.1f,%.4f]\n",
-	  name, node->start, node->stop, avg, med, cov);
-  for (j = 0; j < node->len; ++j)
-    {
-    fprintf(fp, "%u ", node->vals[j]);
-    // count_increase will alloc memory space automatically
-    count_increase(a->c_dep, node->vals[j], uint32_t);
-    }
-  putc('\n', fp);
+  int tid;
+  int lstpos;
+  bedreglist_t *tar;
+  bedreglist_t *flk;
+  count32_t *depvals_of_chr;
+  char *name;
+  struct depnode *tgt_node;
+  struct depnode *flk_node;
+  kstring_t *pdepths;
+  kstring_t *rcov;
+  BGZF *fdep; // write depth to this file
+  BGZF *freg; // write coverage of each region to this file
+  }
+loopbams_parameters_t;
+
+loopbams_parameters_t * init_loopbams_parameters()
+  {
+  loopbams_parameters_t * para;
+  para = (loopbams_parameters_t*)needmem(sizeof(loopbams_parameters_t));
+  para->tid = -1;
+  para->lstpos = 0;
+  para->tar = NULL;
+  para->flk = NULL;
+  para->depvals_of_chr = NULL;
+  para->name = NULL;
+  para->tgt_node = NULL;
+  para->flk_node = NULL;
+  para->pdepths = (kstring_t*)needmem(sizeof(kstring_t));
+  para->rcov = (kstring_t*)needmem(sizeof(kstring_t));
+  para->pdepths->l = para->pdepths->m = 0;
+  para->rcov->l = para->rcov->m = 0;
+  para->fdep = bgzf_open("depth.tsv.gz", "w");
+  if (isNull(para->fdep))
+    errabort("failed to open file depth.tsv.gz");
+  para->freg = bgzf_open("region.tsv.gz", "w");
+  if (isNull(para->freg))
+    errabort("failed to open file region.tsv.gz");
+  return para;
+  }
+
+int close_loopbam_parameters(loopbams_parameters_t *para)
+  {
+  if (para->tgt_node) errabort("target node is still reachable");
+  if (para->flk_node) errabort("flank node is still reachable");
+  freemem(para->pdepths->s);
+  freemem(para->rcov->s);
+  mustfree(para->pdepths);
+  mustfree(para->rcov);
+  bgzf_close(para->fdep);
+  bgzf_close(para->freg);
+  mustfree(para);
   return 1;
   }
 
-int print_zerotgtdep(char *name, FILE *fp, struct depnode *node, aux_t *a)
+int write_buffer_bgzf(kstring_t *str, BGZF *fp)
   {
+  int write_size;
+  if (str->l)
+    {
+    write_size = bgzf_write(fp, str->s, str->l);
+    str->l = 0;
+    return write_size;
+    }
+  return 0;
+  }
+
+int stat_each_region(loopbams_parameters_t *para, aux_t *a)
+  {
+  struct depnode * node = para->tgt_node;
+  if (isNull(node)) return 0;
   int j;
-  fprintf(fp, ">%s:%d-%d:NA:NA\t[0,0,0]\n",
-	  name, node->start, node->stop);
-  for (j = 0; j < node->len; ++j)
-    fputs("0 ", fp);
-  putc('\n', fp);
-  count_increaseN(a->c_dep, 0, node->len, uint32_t);
-  count_increase(a->c_reg, 0, uint32_t);
+  float avg, med, cov;
+  if (node->len)
+    {
+    avg = avg_cal(node->vals, node->len);
+    med = median_cal(node->vals, node->len);
+    cov = coverage_cal(node->vals, node->len);
+    for (j = 0; j < node->len; ++j)
+      {
+      ksprintf(para->pdepths, "%s\t%d\t%u\n", para->name, node->start + j, node->vals[j]);
+      // count_increase will alloc memory space automatically
+      count_increase(para->depvals_of_chr, node->vals[j], uint32_t);
+      }
+    }
+  else
+    {
+    avg = med = cov = 0.0;
+    for (j = 0; j < node->len; ++j) ksprintf(para->pdepths, "%s\t%d\t0\n", para->name, node->start+j);
+    count_increaseN(para->depvals_of_chr, 0, node->len, uint32_t);
+    }
+  //ksprintf(para->pdepths,"\n");
+  count_increase(a->c_reg, (int)avg, uint32_t);
+  ksprintf(para->rcov,"%s\t%u\t%u\t%.2f\t%.1f\t%.4f\n",
+	   para->name, node->start, node->stop, avg, med, cov);
+  if (para->pdepths->l > WINDOW_SIZE) write_buffer_bgzf(para->pdepths, para->fdep);
+  if (para->rcov->l > WINDOW_SIZE) write_buffer_bgzf(para->rcov, para->freg);
   return 1;
   }
-	
+
+int check_reachable_regions(loopbams_parameters_t *para, aux_t *a)
+  {
+  khiter_t k;
+  for (k = 0; k < kh_end(a->h_tgt); ++k)
+    {
+    if (kh_exist(a->h_tgt, k))
+      {
+      para->name = (char*)kh_key(a->h_tgt, k);
+      para->tar = &kh_val(a->h_tgt, k);
+      if (para->tar->flag == 1) continue; // already reach
+      count32_init(para->depvals_of_chr);
+      para->tar->data = (void*)para->depvals_of_chr;
+      para->flk = &kh_val(a->h_flk, k);
+      para->tgt_node = bed_depnode_list(para->tar);
+      para->flk_node = bed_depnode_list(para->flk);
+      while (para->tgt_node)
+	{
+	stat_each_region(para, a);
+	del_node(para->tgt_node); // no need allocate memory for these nodes
+	}
+      count_merge(a->c_dep, para->depvals_of_chr, uint32_t);
+      while(para->flk_node)
+	{
+	count_increaseN(a->c_flkdep, 0, para->flk_node->len, uint32_t);
+	del_node(para->flk_node); // no need allocate memory for these nodes
+	}
+      }
+    }
+  return 1;
+  }
+
+int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
+  {
+  int j;
+  struct depnode *node = para->flk_node;  
+  for (j = 0; j < node->len; ++j)
+    count_increase(a->c_flkdep, node->vals[j], uint32_t);
+  del_node(para->flk_node);
+  depnode_init(para->flk_node);
+  return 1;
+  }
+
+// load bam files and stat the depths
+// huge function, need IMPROVE it!!
 int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   {
-  int i, j;
-  int ret;
-  int tid = -1;
-  int lstpos = 0;
+  // get the chromosome name from header
   bam_header_t *h = a->h;
-  bedreglist_t *tar;
-  bedreglist_t *flk;
-  if (f->outdir) chdir(f->outdir);
-  FILE *fp = open_wfile("target.dep");
-  struct depnode *tgt_node = NULL;
-  struct depnode *flk_node = NULL;
-  char *name;
-  int dbgret;
+  loopbams_parameters_t *para = init_loopbams_parameters(); 
+  if (f->outdir) chdir(f->outdir); // FIXME: if there is no such dir
+  
+  int i;
   for (i = 0; i < a->ndata; ++i)
     {
     bamFile dat = a->data[i];
     bool goto_next_chromosome = FALSE;
+    int ret;
+    // main loop
     while (1)
       {
       bam1_t *b;
       b = (bam1_t*)needmem(sizeof(bam1_t));
+
       ret = bam_read1(dat, b);
       if (ret == -1)
 	{
-	mustfree(b); break;				//normal end
+	mustfree(b); break; //normal end
 	}
-      if (ret == -2) errabort("%d bam file is truncated!\n", i + 1);
+      else if (ret == -2)
+	errabort("%d bam file is truncated!\n", i + 1);
+      
       bam1_core_t *c = &b->core;
       flagstat(fs, c, ret);
       if (c->qual > f->mapQ_lim) fs->n_qual++;
-      if (rmdup_mark && ret > 1) goto endcore;
-      if (c->tid == -1) goto endcore;
+      //if (rmdup_mark && ret > 1) goto endcore;
+      // rmdup is removed since version 1.0.0
+
+      if (c->tid == -1) goto endcore; // unmapped~
+
       /* stat the insertsize */
       if (c->isize > 0 && c->isize < f->isize_lim)
 	{
 	count_increase(a->c_isize, c->isize, uint32_t);
 	}
-			
-      if (tid == c->tid )
+
+      if (para->tid == c->tid )
 	{
 	if (goto_next_chromosome) goto endcore;
-	if (tid == c->tid && lstpos > c->pos)
+	if (para->lstpos > c->pos) // Only accepted sorted bam files for effective
 	  errabort("The bam file is not sorted!");
 	}
-      lstpos = c->pos;
-      if (tid != c->tid) // FIXME: need multi thread to improve it
+      para->lstpos = c->pos;
+
+      // if tid != c->tid, completed the stat of the last chromosome
+      // init the new chromosome node and clean the memory
+      // FIXME: need multi thread to improve it or NOT?
+      if (para->tid != c->tid) 
 	{
-	goto_next_chromosome = FALSE;
-	if (tgt_node && tid >= 0)
+
+	goto_next_chromosome = FALSE; // clean the flag of skiping
+
+	// still have reachable target node
+	// release the left nodes
+	if (para->tgt_node && para->tid >= 0)
 	  {
-	  print_tgtdep(name, fp, tgt_node, a);
-	  del_node(tgt_node);
-	  INIT_DEBUG(depnode_init(tgt_node));
-	  while (tgt_node)
+	  stat_each_region(para, a);
+	  del_node(para->tgt_node);
+	  depnode_init(para->tgt_node);
+	  while (para->tgt_node)
 	    {
-	    print_zerotgtdep(name, fp, tgt_node, a);
-	    del_node(tgt_node);
-	    INIT_DEBUG(depnode_init(tgt_node));
+	    stat_each_region(para, a);
+	    del_node(para->tgt_node);
+	    // no need allocate memory space for these node, becase they are all 0s
 	    }
 	  }
-	if (flk_node && tid >= 0)
+	if (para->flk_node && para->tid >= 0)
 	  {
-	  int j;
-	  for (j = 0; j < flk_node->len; ++j)
-	    count_increase(a->c_flkdep, flk_node->vals[j], uint32_t);
-	  del_node(flk_node);
-	  INIT_DEBUG(depnode_init(flk_node));
-					
-	  while (flk_node)
+	  stat_flk_depcnt(para, a);
+	  while (para->flk_node)
 	    {
-	    count_increaseN(a->c_flkdep, 0, flk_node->len, uint32_t);
-	    //a->c_flkdep->a[0] += flk_node->len;
-	    del_node(flk_node);
-	    INIT_DEBUG(depnode_init(flk_node));						
+	    count_increaseN(a->c_flkdep, 0, para->flk_node->len, uint32_t);
+	    del_node(para->flk_node);
 	    }
 	  }
-	tid = c->tid;
-	name = h->target_name[tid];
-	debug("%s",name);
-	if (tid > a->nchr)
+
+	if (para->tid >= 0) // add the depth counts of each chromosome to target counts
+	  count_merge(a->c_dep, para->depvals_of_chr, uint32_t);
+
+	para->tid = c->tid;
+	para->name = h->target_name[c->tid];
+
+	// impossible in normal pratices, only happens in the different bam headers	
+	if (para->tid > a->nchr) 
 	  errabort("chromosome %s is not in bam header!"
 		   "It must be use different bam headers"
-		   , name);
+		   , para->name);
 	khiter_t k;
-	k = kh_get(reg, a->h_tgt, name);
+	k = kh_get(reg, a->h_tgt, para->name);
 	if (k == kh_end(a->h_tgt))
 	  {
-	  tgt_node = NULL;
-	  flk_node = NULL;
+	  para->tgt_node = NULL;
+	  para->flk_node = NULL;
 	  goto_next_chromosome = TRUE;
 	  goto endcore;
 	  }
-	tar = &kh_val(a->h_tgt, k);
-	flk = &kh_val(a->h_flk, k);
-	if (tar->flag || flk->flag)
+	para->tar = &kh_val(a->h_tgt, k);
+	para->flk = &kh_val(a->h_flk, k);
+	count32_t *tmp;
+	count32_init(tmp);
+	para->depvals_of_chr = tmp;
+	para->tar->data = (void*)para->depvals_of_chr;
+	if (para->tar->flag || para->flk->flag)
 	  errabort("bam files are not properly sorted\n");
-	tgt_node = bed_depnode_list(tar);
-	flk_node = bed_depnode_list(flk);
+	para->tgt_node = bed_depnode_list(para->tar);
+	para->flk_node = bed_depnode_list(para->flk);
+	para->tar->flag = para->flk->flag =1;
 	}
-      while (flk_node && flk_node->stop < lstpos+1)
+      while (para->flk_node && para->flk_node->stop < para->lstpos+1)
+	stat_flk_depcnt(para, a);
+
+      if (para->flk_node && readcore(para->flk_node, b)) fs->n_flk++;
+      while (para->tgt_node && para->tgt_node->stop < para->lstpos +1)
 	{
-	int j;
-	for (j = 0; j < flk_node->len; ++j)
-	  count_increase(a->c_flkdep, flk_node->vals[j], uint32_t);
-	del_node(flk_node);
-	if (flk_node && isZero(flk_node->len))
-	  INIT_DEBUG(depnode_init(flk_node));
+	stat_each_region(para, a);
+	del_node(para->tgt_node);
+	if (para->tgt_node && isZero(para->tgt_node->len)) depnode_init(para->tgt_node);
 	}
-      if (flk_node && readcore(flk_node, b)) fs->n_flk++;
-      while (tgt_node && tgt_node->stop < lstpos +1)
-	{
-	print_tgtdep(name, fp, tgt_node, a);
-	del_node(tgt_node);
-	if (tgt_node && isZero(tgt_node->len))
-	  INIT_DEBUG(depnode_init(tgt_node));
-	}
-      if (tgt_node && readcore(tgt_node, b)) fs->n_tgt++;
+      if (para->tgt_node && readcore(para->tgt_node, b)) fs->n_tgt++;
       endcore:
       bam_destroy1(b);
       }
     }
-  khiter_t k, l;
-  for (k = 0; k < kh_end(a->h_tgt); ++k)
-    {
-    if (kh_exist(a->h_tgt, k))
-      {
-      char *name;
-      name = (char *)kh_key(a->h_tgt, k);
-      tar = &kh_val(a->h_tgt, k);
-      if (tar->flag == 1)
-	continue;
-      flk = &kh_val(a->h_flk, k);
-      tgt_node = bed_depnode_list(tar);
-      flk_node = bed_depnode_list(flk);
-      while (tgt_node)
-	{
-	print_zerotgtdep(name, fp, tgt_node, a);
-	del_node(tgt_node);
-	}
-      while (flk_node)
-	{
-	count_increaseN(a->c_flkdep, 0, flk_node->len, uint32_t);
-	del_node(flk_node);
-	}
-      }
-    }
-  fclose(fp);
+  check_reachable_regions(para, a);
+  write_buffer_bgzf(para->pdepths, para->fdep);
+  write_buffer_bgzf(para->rcov, para->freg);
+  close_loopbam_parameters(para);
   return 1;
   }
  
@@ -784,70 +918,72 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 
   FILE *fc = open_wfile("coverage.report");
 
-  {	
-  //total
-  fprintf(fc, "%60s\t%lld\n", report_total[0], fs->n_reads);
-  fprintf(fc, "%60s\t%lld\n", report_total[1], fs->n_qcfail);
-  fprintf(fc, "%60s\t%.2f\n", report_total[2], (float)fs->n_data / 1e6);
-  fprintf(fc, "%60s\t%lld\n", report_total[3], fs->n_pair_all);
-  fprintf(fc, "%60s\t%lld\n", report_total[4], fs->n_mapped);
-  fprintf(fc, "%60s\t%.2f\n", report_total[5], (float)fs->n_mapped / fs->n_reads);
-  fprintf(fc, "%60s\t%.2f\n", report_total[6], fs->n_mdata / 1e6);
-  fprintf(fc, "%60s\t%.2f\n", report_total[7], (float)fs->n_mdata / fs->n_data);
-  fprintf(fc, "%60s\t%lld\n", report_total[8], fs->n_pair_good);
-  fprintf(fc, "%60s\t%.2f\n", report_total[7], (float)fs->n_pair_good / fs->n_reads);
-  fprintf(fc, "%60s\t%lld\n", report_total[9], fs->n_pair_map);
-  fprintf(fc, "%60s\t%.2f\n", report_total[10], (float)fs->n_pair_map / fs->n_reads);
-  fprintf(fc, "%60s\t%lld\n", report_total[11], fs->n_sgltn);
-  fprintf(fc, "%60s\t%lld\n", report_total[13], fs->n_diffchr);
-  fprintf(fc, "%60s\t%lld\n", report_total[14], fs->n_read1);
-  fprintf(fc, "%60s\t%lld\n", report_total[15], fs->n_read2);
-  fprintf(fc, "%60s\t%lld\n", report_total[16], fs->n_pstrand);
-  fprintf(fc, "%60s\t%lld\n", report_total[17], fs->n_mstrand);
-  fprintf(fc, "%60s\t%lld\n", report_total[18], fs->n_dup);
-  fprintf(fc, "%60s\t%.2f\n", report_total[19], (float)fs->n_dup / fs->n_reads);
-  fprintf(fc, "%60s\t%d\n", report_total[20], f->mapQ_lim);
-  fprintf(fc, "%60s\t%lld\n", report_total[21], fs->n_qual);
-  fprintf(fc, "%60s\t%.2f\n", report_total[22], (float)fs->n_qual / fs->n_reads);
-  fprintf(fc, "%60s\t%.2f\n", report_total[23], (float)fs->n_qual / fs->n_mapped);
-  //tgt
-  fprintf(fc, "%60s\t%lld\n", report_tar[0], fs->n_tgt);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[1], (float)fs->n_tgt / fs->n_reads);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[2], (float)fs->n_tgt / fs->n_mapped);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[3], (float)fs->n_tdata / 1e6);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[4], (float)fs->n_tdata / fs->n_data);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[5], (float)fs->n_tdata / fs->n_mdata);
-  fprintf(fc, "%60s\t%lld\n", report_tar[6], a->tgt_len);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[7], (float)fs->n_tdata / a->tgt_len);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[8], tarcov->cov);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[9], tarcov->cov4);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[10], tarcov->cov10);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[11], tarcov->cov30);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[12], tarcov->cov100);
-  //tgt regions
-  fprintf(fc, "%60s\t%u\n", report_tar[13], a->tgt_nreg);
-  fprintf(fc, "%60s\t%lld\n", report_tar[14], regcov->cnt);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[15], regcov->cov);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[16], regcov->cov4);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[17], regcov->cov10);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[18], regcov->cov30);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[19], regcov->cov100);
-  //flk
-  fprintf(fc, "%60s\t%u\n", report_tar[20], flank_reg);
-  fprintf(fc, "%60s\t%lld\n", report_tar[21], a->flk_len);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[22], (float)fs->n_fdata / a->flk_len);
-  fprintf(fc, "%60s\t%lld\n", report_tar[23], fs->n_flk);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[24], (float)fs->n_flk / fs->n_reads);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[25], (float)fs->n_flk / fs->n_mapped);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[26], (float)fs->n_fdata / 1e6);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[27], (float)fs->n_fdata / fs->n_data);
-  fprintf(fc, "%60s\t%.2f\n", report_tar[28], (float)fs->n_fdata / fs->n_mdata);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[29], flkcov->cov);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[30], flkcov->cov4);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[31], flkcov->cov10);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[32], flkcov->cov30);
-  fprintf(fc, "%60s\t%.4f\n", report_tar[33], flkcov->cov100);
-  }
+  do
+    {	
+    fprintf(fc, "%60s\t%ld\n", report_total[0], fs->n_reads);
+    fprintf(fc, "%60s\t%ld\n", report_total[1], fs->n_qcfail);
+    fprintf(fc, "%60s\t%.2f\n", report_total[2], (float)fs->n_data / 1e6);
+    fprintf(fc, "%60s\t%ld\n", report_total[3], fs->n_pair_all);
+    fprintf(fc, "%60s\t%ld\n", report_total[4], fs->n_mapped);
+    fprintf(fc, "%60s\t%.2f\n", report_total[5], (float)fs->n_mapped / fs->n_reads);
+    fprintf(fc, "%60s\t%.2f\n", report_total[6], fs->n_mdata / 1e6);
+    fprintf(fc, "%60s\t%.2f\n", report_total[7], (float)fs->n_mdata / fs->n_data);
+    fprintf(fc, "%60s\t%ld\n", report_total[8], fs->n_pair_good);
+    fprintf(fc, "%60s\t%.2f\n", report_total[7], (float)fs->n_pair_good / fs->n_reads);
+    fprintf(fc, "%60s\t%ld\n", report_total[9], fs->n_pair_map);
+    fprintf(fc, "%60s\t%.2f\n", report_total[10], (float)fs->n_pair_map / fs->n_reads);
+    fprintf(fc, "%60s\t%ld\n", report_total[11], fs->n_sgltn);
+    fprintf(fc, "%60s\t%ld\n", report_total[13], fs->n_diffchr);
+    fprintf(fc, "%60s\t%ld\n", report_total[14], fs->n_read1);
+    fprintf(fc, "%60s\t%ld\n", report_total[15], fs->n_read2);
+    fprintf(fc, "%60s\t%ld\n", report_total[16], fs->n_pstrand);
+    fprintf(fc, "%60s\t%ld\n", report_total[17], fs->n_mstrand);
+    fprintf(fc, "%60s\t%ld\n", report_total[18], fs->n_dup);
+    fprintf(fc, "%60s\t%.2f\n", report_total[19], (float)fs->n_dup / fs->n_reads);
+    fprintf(fc, "%60s\t%d\n", report_total[20], f->mapQ_lim);
+    fprintf(fc, "%60s\t%ld\n", report_total[21], fs->n_qual);
+    fprintf(fc, "%60s\t%.2f\n", report_total[22], (float)fs->n_qual / fs->n_reads);
+    fprintf(fc, "%60s\t%.2f\n", report_total[23], (float)fs->n_qual / fs->n_mapped);
+    //tgt
+    fprintf(fc, "%60s\t%ld\n", report_tar[0], fs->n_tgt);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[1], (float)fs->n_tgt / fs->n_reads);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[2], (float)fs->n_tgt / fs->n_mapped);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[3], (float)fs->n_tdata / 1e6);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[4], (float)fs->n_tdata / fs->n_data);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[5], (float)fs->n_tdata / fs->n_mdata);
+    fprintf(fc, "%60s\t%ld\n", report_tar[6], a->tgt_len);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[7], (float)fs->n_tdata / a->tgt_len);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[8], tarcov->cov);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[9], tarcov->cov4);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[10], tarcov->cov10);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[11], tarcov->cov30);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[12], tarcov->cov100);
+    //tgt regions
+    fprintf(fc, "%60s\t%u\n", report_tar[13], a->tgt_nreg);
+    fprintf(fc, "%60s\t%ld\n", report_tar[14], regcov->cnt);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[15], regcov->cov);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[16], regcov->cov4);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[17], regcov->cov10);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[18], regcov->cov30);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[19], regcov->cov100);
+    //flk
+    fprintf(fc, "%60s\t%u\n", report_tar[20], flank_reg);
+    fprintf(fc, "%60s\t%ld\n", report_tar[21], a->flk_len);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[22], (float)fs->n_fdata / a->flk_len);
+    fprintf(fc, "%60s\t%ld\n", report_tar[23], fs->n_flk);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[24], (float)fs->n_flk / fs->n_reads);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[25], (float)fs->n_flk / fs->n_mapped);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[26], (float)fs->n_fdata / 1e6);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[27], (float)fs->n_fdata / fs->n_data);
+    fprintf(fc, "%60s\t%.2f\n", report_tar[28], (float)fs->n_fdata / fs->n_mdata);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[29], flkcov->cov);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[30], flkcov->cov4);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[31], flkcov->cov10);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[32], flkcov->cov30);
+    fprintf(fc, "%60s\t%.4f\n", report_tar[33], flkcov->cov100);
+    }
+  while(0);
+  
   mustfree(tarcov);
   mustfree(regcov);
   mustfree(flkcov);
@@ -872,7 +1008,7 @@ static struct option const long_opts[] =
   {"cutoffdepth", required_argument, NULL, CUTOFF},
   {"isize", required_argument, NULL, INSERTSIZE},
   {"mapthres", required_argument, NULL, 'q'},
-  {"rmdup", no_argument, NULL, 'd'},
+  //{"rmdup", no_argument, NULL, 'd'},
   {"help", no_argument, NULL, 'h'}
   };
 
@@ -882,7 +1018,7 @@ int bamdst(int argc, char *argv[])
   char *probe = 0;
   //bool help = FALSE;
   struct opt_aux *opt = opt_init();
-  while ((n = getopt_long(argc, argv, "o:p:f:q:l:dh", long_opts, NULL)) >= 0)
+  while ((n = getopt_long(argc, argv, "o:p:f:q:l:h", long_opts, NULL)) >= 0)
     {
     switch (n)
       {
@@ -898,7 +1034,7 @@ int bamdst(int argc, char *argv[])
       case INSERTSIZE: opt->isize_lim = atoi(optarg); break;
       case 'q': opt->mapQ_lim = atoi(optarg); break;
       case 'h': usage(1); break;
-      case 'd': rmdup_mark = TRUE; break;
+	//case 'd': rmdup_mark = TRUE; break;
       default: usage(0); 
 	//more help
       }

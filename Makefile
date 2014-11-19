@@ -53,4 +53,4 @@ bedutil.o:bedutil.c bedutil.h
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bedutil.c -o $@	
 
 clean:
-		rm -fr gmon.out *.o a.out *.exe *.dSYM  $(PROG) *~ *.a *.so.* *.so *.dylib samlib/*.o
+		rm -fr gmon.out *.o a.out *.exe *.dSYM  $(PROG) *~ *.a target.dep *.plot coverage.report *.tsv.gz
