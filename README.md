@@ -9,10 +9,12 @@ USAGE
 ------
 
 Normal:
-	* bamdst -p <probe.bed> -o . in1.bam
+
+	- bamdst -p <probe.bed> -o . in1.bam
 
 Pipeline mode:
-	* samtools view in1.bam -u | bamdst -p x.bed -o . -
+
+	- samtools view in1.bam -u | bamdst -p x.bed -o . -
 
 PARAMETERS
 -----------
