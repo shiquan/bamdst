@@ -54,10 +54,10 @@ OUTPUT FILES
 ------------
 Seven files will be created in the output direction. There are:
 
-* ** coverage.report **
-* ** cumu.plot **
-* ** insert.plot **
-* ** chromosome.report **
-* ** region.tsv.gz **
-* ** depth.tsv.gz **
-* ** uncover.bed **
+* **coverage.report**
+* **cumu.plot**
+* **insert.plot**
+* **chromosome.report**
+* **region.tsv.gz**
+* **depth.tsv.gz**
+* **uncover.bed**
