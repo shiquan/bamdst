@@ -351,6 +351,7 @@ bamflag_t *bamflag_init()
 
 static void emit_try_help(void)
   {
+  fprintf (stderr, "out dir and bed file are mandatory!\n");
   fprintf (stderr, "Try '%s --help' for more information.\n", program_name);
   }
 
@@ -388,21 +389,24 @@ Ordering options:\n\
  - cumu.plot           distribution data of depth values\n\
  - insert.plot         distribution data of inferred insert size \n\
  - chromosome.report   coverage information for each chromosome\n\
- - region.tsv.gz         mean depth, median depth and coverage of each region\n\
+ - region.tsv.gz       mean depth, median depth and coverage of each region\n	\
  - depth.tsv.gz        raw depth, rmdup depth, coverage depth of each position\n\
  - uncover.bed         the bad covered or uncovered region in the probe file\n\
 \n\
 * About depth.tsv.gz:\n\
-* There are five columns in this file, including chromosome, position, raw depth,\n\
-* rmdep depth, coverage depth\n\
+* There are five columns in this file, including chromosome, position, raw\n\
+* depth, rmdep depth, coverage depth\n\
  - chromosome          the chromosome name\n\
  - position            1-based position of each chromosome\n\
  - raw depth           raw depth of position, not filter\n\
- - rmdup depth         remove duplication, and only calculate the reads which are \n\
-                       primary mapped and mapQ >= cutoff_mapQ (default 20)\n\
+ - rmdup depth         remove duplication, and only calculate the reads which\n\
+                       are primary mapped and mapQ >= cutoff_mapQ (default 20)\n\
  - coverage depth      calculate the deletions (CIGAR level) into depths,\n\
                        for coverage use.\n\
 ");
+      puts("============\n");
+      puts(" HOMEPAGE: \n\
+      https://github.com/shiquan/bamdst\n");
     }
   exit(EXIT_SUCCESS);
   }
@@ -1108,7 +1112,7 @@ int bamdst(int argc, char *argv[])
 		
     }
   if (isNull(opt->outdir) || isNull(probe))
-    errabort("out dir and bed file are mandatory!");
+    usage(0);
   n = argc - optind;
   //capable of deals with severl bam files
   aux_t * aux;
