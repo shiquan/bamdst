@@ -61,3 +61,20 @@ Seven files will be created in the output direction. There are:
 * **region.tsv.gz**
 * **depth.tsv.gz**
 * **uncover.bed**
+
+DETAILS of each file
+--------------------
+
+**coverage.report**
+
+**cumu.plot**
+
+**insert.plot**
+
+**chromosome.report**
+
+**region.tsv.gz**
+
+**depth.tsv.gz**
+
+**uncover.bed**

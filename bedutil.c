@@ -95,10 +95,10 @@ bed_read(const char *fn, regHash_t * reghash, int add1, int add2)
 	    {
 	    end = atoi(str->s);
 	    if (end < beg) swapvalue(beg, end, uint32_t);
+	    while (dret != '\n' && ks_getuntil(ks, 0, str, &dret) > 0); // skip all other parts
 	    }
 	  }
 	}
-      while (dret != '\n' && (ks_getc(ks)) > 0); // skip all other parts
       }
     if (beg>>31) beg = 0;
     if (end <= 0) end = beg; // this is different from bed_read in bedidx.c
