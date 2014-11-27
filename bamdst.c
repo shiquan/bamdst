@@ -49,14 +49,6 @@ static int flank_reg = 200;
 /* extern bedHand from bedutil.c, it is a collection of functions*/
 extern bedHandle_t *bedHand;
 
-/* We can only support max 20 files or you can self define this value*/
-#if !defined OPEN_MAX && defined NR_OPEN
-# define OPEN_MAX NR_OPEN
-#endif
-#if !defined OPEN_MAX
-# define OPEN_MAX 20
-#endif
-
 /* only accepted one stdin pipeline */
 static bool stdin_lock = FALSE;
 
@@ -239,6 +231,7 @@ struct _aux
 
   // count struct of depths, insertsize, flank depths, target regions
   count32_t *c_dep;
+  //count32_t *c_cov; // for coverage
   count32_t *c_isize;
   count32_t *c_flkdep;
   count32_t *c_reg;
@@ -256,6 +249,7 @@ struct _aux  *aux_init()
   a->h_tgt = kh_init(reg);
   a->h_flk = kh_init(reg);
   count32_init(a->c_dep);
+  //count32_init(a->c_cov);
   count32_init(a->c_isize);
   count32_init(a->c_flkdep);
   count32_init(a->c_reg);
@@ -528,8 +522,7 @@ typedef enum
   CDEL,
   CDUP,
   UNKNOWN
-  }
-cntstat_t;
+  } cntstat_t;
 
 int match_pos(struct depnode * header, uint32_t pos, cntstat_t state)
   {
@@ -687,36 +680,39 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
   struct depnode * node = para->tgt_node;
   if (isNull(node)) return 0;
   int j;
-  float avg, med, cov;
+  float avg, med, cov1, cov2;
   if (node->len)
     {
     avg = avg_cal(node->vals, node->len);
     med = median_cal(node->vals, node->len);
-    cov = coverage_cal(node->covdep, node->len);
+    cov1 = coverage_cal(node->vals, node->len);
+    cov2 = coverage_cal(node->covdep, node->len);
     for (j = 0; j < node->len; ++j)
       {
       ksprintf(para->pdepths, "%s\t%d\t%u\t%u\t%u\n",
 	       para->name, node->start + j, node->vals[j], node->rmdupdep[j], node->covdep[j]);
       // count_increase will alloc memory space automatically
-      count_increase(para->depvals_of_chr, node->vals[j], uint32_t);
+      // use covdep to calculate coverage and averge depth
+      count_increase(para->depvals_of_chr, node->covdep[j], uint32_t); 
       }
     }
   else
     {
-    avg = med = cov = 0.0;
+    avg = med = cov1 = cov2 = 0.0;
     for (j = 0; j < node->len; ++j)
       ksprintf(para->pdepths, "%s\t%d\t0\t0\t0\n", para->name, node->start+j);
     count_increaseN(para->depvals_of_chr, 0, node->len, uint32_t);
     }
   //ksprintf(para->pdepths,"\n");
   count_increase(a->c_reg, (int)avg, uint32_t);
-  ksprintf(para->rcov,"%s\t%u\t%u\t%.2f\t%.1f\t%.4f\n",
-	   para->name, node->start, node->stop, avg, med, cov);
+  ksprintf(para->rcov,"%s\t%u\t%u\t%.2f\t%.1f\t%.4f\t%.f\n",
+	   para->name, node->start, node->stop, avg, med, cov1, cov2);
   if (para->pdepths->l > WINDOW_SIZE) write_buffer_bgzf(para->pdepths, para->fdep);
   if (para->rcov->l > WINDOW_SIZE) write_buffer_bgzf(para->rcov, para->freg);
   return 1;
   }
 
+// if bam files not contained all chromosomes in the bed file
 int check_reachable_regions(loopbams_parameters_t *para, aux_t *a)
   {
   khiter_t k;
@@ -960,6 +956,20 @@ void cntcov_cal(struct opt_aux *f,
     }
   }
 
+float median_cnt(count32_t *cnt)
+  {
+  int i;
+  uint64_t sum = 0;
+  for (i = 0; i < cnt->m; ++i) sum += (uint64_t)cnt->a[i];
+  uint64_t med = sum/2;
+  uint64_t num = 0;
+  for (i = 0; i < cnt->m; ++i)
+    {
+    num += (uint64_t)cnt->a[i];
+    if (num >= med) return (float)i;
+    }
+  }
+
 int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   {
   int i;
@@ -968,28 +978,68 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   FILE *fdep;
   finsert = open_wfile("insertsize.plot");
   fdep = open_wfile("depth_distribution.plot");
+  
   struct regcov *tarcov = regcov_init();
   struct regcov *flkcov = regcov_init();
   struct regcov *regcov = regcov_init();
   uint64_t icnt = 0;
   uint64_t dcnt = 0;
-  for (i = 0; i < a->c_isize->m; ++i)	 icnt += a->c_isize->a[i];
+  for (i = 0; i < a->c_isize->m; ++i) icnt += a->c_isize->a[i];
+  uint64_t icumu = icnt;
   for (i = 0; i < a->c_isize->m; ++i)
-    fprintf(finsert, "%d\t%d\t%f\n",
-	    i, a->c_isize->a[i], (float)a->c_isize->a[i] / icnt);
-  for (i = 0; i < a->c_dep->m; ++i)	 dcnt += a->c_dep->a[i];
+    {
+    icumu -= a->c_isize->a[i];
+    fprintf(finsert, "%d\t%d\t%f\t%d\t%f\n",
+	    i, a->c_isize->a[i], (float)a->c_isize->a[i] / icnt, icumu, (float)icumu/ icnt );
+    }
+
+  for (i = 0; i < a->c_dep->m; ++i) dcnt += a->c_dep->a[i];
+  uint64_t dcumu = dcnt;
   for (i = 0; i < a->c_dep->m; ++i)
-    fprintf(fdep, "%d\t%d\t%f\n",
-	    i, a->c_dep->a[i], (float)a->c_dep->a[i] / dcnt);
+    {
+    dcumu -= a->c_dep->a[i];
+    fprintf(fdep, "%d\t%d\t%f\t%d\t%f\n",
+	    i, a->c_dep->a[i], (float)a->c_dep->a[i] / dcnt, dcumu, (float)dcumu/dcnt);
+    }
   fclose(fdep);
   fclose(finsert);
+  
   cntcov_cal(f, tarcov, a->c_dep, &fs->n_tdata);
   cntcov_cal(f, regcov, a->c_reg, &fs->n_fdata);
   //merge_cnt(a->c_flkdep, a->c_dep);
   cntcov_cal(f, flkcov, a->c_flkdep, &fs->n_fdata);
 
-  FILE *fc = open_wfile("coverage.report");
 
+  FILE *fchrcov = open_wfile("chromosomes.report");
+  {
+  fprintf(fchrcov, "#Chromosome\tDATA(%)\tAvg depth\tMedian depth\tCoverage\tCov 4x\tCov 10x\tCov 30x\tCov 100x");
+  if(f->cutoff) fprintf(fchrcov, "Cov %dx", f->cutoff);
+  fprintf(fchrcov,"\n");
+  khiter_t k;
+  for (k = 0; k != kh_end(a->h_tgt); ++k)
+    {
+    if (kh_exist(a->h_tgt, k))
+      {
+      char *name = (char*)kh_key(a->h_tgt, k);
+      count32_t *cnt = (count32_t*)kh_val(a->h_tgt,k).data;
+      uint64_t data = 0;
+      struct regcov *chrcov = regcov_init();
+      cntcov_cal(f, chrcov, cnt, &data);
+      uint64_t length = 0;
+      int i;
+      for (i = 0; i < cnt->m; ++i) length += cnt->a[i];
+      float avg = (float)data/ length;
+      float med = median_cnt(cnt);
+      float per = (float)data/fs->n_tdata*100.0;
+      fprintf(fchrcov, "%s\t%.4f\t%.4f\t%.1f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f",
+	      name, per, avg, med, chrcov->cov, chrcov->cov4, chrcov->cov10, chrcov->cov30, chrcov->cov100);
+      if (f->cutoff) fprintf(fchrcov, "%.2f", chrcov->covx);
+      fprintf(fchrcov, "\n");
+      }
+    }
+  }
+  fclose(fchrcov);
+  FILE *fc = open_wfile("coverage.report");       
   do
     {	
     fprintf(fc, "%60s\t%llu\n", report_total[0], fs->n_reads);
