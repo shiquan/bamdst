@@ -384,7 +384,7 @@ Ordering options:\n\
  - cumu.plot           distribution data of depth values\n\
  - insert.plot         distribution data of inferred insert size \n\
  - chromosome.report   coverage information for each chromosome\n\
- - region.tsv.gz       mean depth, median depth and coverage of each region\n	\
+ - region.tsv.gz       mean depth, median depth and coverage of each region\n\
  - depth.tsv.gz        raw depth, rmdup depth, coverage depth of each position\n\
  - uncover.bed         the bad covered or uncovered region in the probe file\n\
 \n\
