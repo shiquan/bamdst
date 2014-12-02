@@ -25,7 +25,7 @@ libbam.a:$(LOBJS)
 bamdst:lib $(AOBJS) samlib/bam.h
 		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm -lz -lbam
 
-bedutils:bedtk.c $(AOBJS) bedutil.h
+bedutils: $(AOBJS) bedutil.h
 		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bedtk.c $(LIBPATH) $(INCLUDES) -lbam -lz
 
 bgzf.o:bgzf.c bgzf.h
