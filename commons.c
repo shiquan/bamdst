@@ -45,7 +45,7 @@ void errabort(char *format, ...)
   {
   va_list args;
   va_start(args, format);
-  fprintf(stderr, "[ABORT!] ");
+  fprintf(stderr, "@@ ERROR ABORT @@ ");
   stderr_print(format, args);
   va_end(args);
   exit(-1);
@@ -63,7 +63,6 @@ void debug(char const *format, ...)
 
 void LOG(char * format, ...)
   {
-#ifdef DEBUG
   va_list args;
   va_start(args, format);
   if (format != NULL)
@@ -75,7 +74,6 @@ void LOG(char * format, ...)
     fflush(stderr);
     }
   va_end(args);
-#endif
   }
 
 FILE *

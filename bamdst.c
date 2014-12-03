@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-//static char const *Version = "1.0.0";
+static char const *Version = "1.0.0 beta";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -65,10 +65,16 @@ static const int WINDOW_SIZE = 64 * 1024;
 // force replace the existed files
 //static bool is_forced = TRUE;
 
+static char *outdir = 0;
+
+static int uncover_cutoff = 5;
+// init hash struct to store uncover regions
+regHash_t *h_uncov;
+
 struct opt_aux
   {
   int nfiles;
-  char *outdir;
+  //char *outdir;
   char **inputs;
   //	int flk_reg;
   int isize_lim;
@@ -91,7 +97,7 @@ opt_init()
   struct opt_aux *aux;
   aux = (struct opt_aux*)needmem(sizeof(struct opt_aux));
   aux->nfiles = 0;
-  aux->outdir = NULL;
+  //aux->outdir = NULL;
   aux->inputs = NULL;
   //aux->flk_reg = 200;
   aux->isize_lim = 2000;
@@ -115,7 +121,7 @@ struct depnode
 
 void opt_destroy(struct opt_aux *opt)
   {
-  freemem(opt->outdir);
+  //freemem(opt->outdir);
   int i;
   for (i = 0; i < opt->nfiles; ++i) freemem(opt->inputs[i]);
   freemem(opt->inputs);
@@ -180,8 +186,8 @@ static struct depnode *
 bed_depnode_list(bedreglist_t *bed)
   {
   struct depnode *node;
-  struct depnode *header;
-  struct depnode *tmpnode;
+  struct depnode *header = NULL;;
+  struct depnode *tmpnode = NULL;
   int i;
   for ( i = 0; i < bed->m; ++i)
     {
@@ -264,7 +270,6 @@ void destroy_data(void *data)
 
 void aux_destroy(struct _aux *a)
   {
-  int i;
   free(a->data);
   bedHand->destroy((void *)a->h_tgt, destroy_data);
   bedHand->destroy((void *)a->h_flk, destroy_void);
@@ -302,6 +307,7 @@ bamflag_t *bamflag_init()
   return fs;
   }
 
+// use this macro to stat the flags 
 #define flagstat(s, c, ret) do {					\
  ++(s)->n_reads;							\
  (s)->n_data += (c)->l_qseq;						\
@@ -355,7 +361,7 @@ void usage(int status)
     emit_try_help();
   else
     {
-    printf ("\
+    printf ("\n\
 USAGE : %s [OPTION] -p <probe.bed> -o <output_dir> [in1.bam [in2.bam ... ]]\n\
    or : %s [OPTION] -p <probe.bed> -o <output_dir> -\n\
 ",
@@ -372,6 +378,7 @@ Ordering options:\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
    --cutoffdepth [0]   list the coverage of above depths\n\
    --isize [2000]      stat the inferred insert size under this value\n\
+   --uncover [5]       region will included in uncover file if below it\n\
    -h, --help          print this help info\n\
 \n");
     /*-d, --rmdup         remove dup reads when calculate depth\n	\*/
@@ -432,7 +439,7 @@ static float avg_cal(const uint32_t * array, int l)
   int i;
   for (i = 0; i < l; ++i) avg += (float)array[i];
   avg /= (float)l;
-  return avg;
+  return avg ;
   }
 
 static float coverage_cal(const uint32_t * array, int l)
@@ -443,7 +450,7 @@ static float coverage_cal(const uint32_t * array, int l)
   for (i = 0; i < l; ++i)
     if (array[i]) cov++;
   cov /= (float)l;
-  return cov;
+  return cov * 100;
   }
 
 // ugly report!!! 
@@ -513,6 +520,25 @@ int load_bed_init(char const *fn, aux_t * a)
   a->flk_len = inf2->length;
   mustfree(inf1);
   mustfree(inf2);
+  return 1;
+  }
+
+// this function used to add an region to the bedregion struct
+// use this struct to store the uncovered region
+int push_bedreg(bedreglist_t *bed, uint32_t begin, uint32_t end)
+  {
+  if (isZero(bed->n))
+    {
+    bed->n = 2;
+    bed->a = (uint64_t*)needmem(bed->n * sizeof(uint64_t));
+    }
+  else if (bed->m == bed->n)
+    {
+    bed->n = bed->m << 1;
+    bed->a = (uint64_t*)enlarge_empty_mem((void*)bed->a, bed->m * sizeof(uint64_t), bed->n *sizeof(uint64_t));
+    }
+  bed->a[bed->m] = (uint64_t)begin << 32 | (uint32_t)end;
+  bed->m++;
   return 1;
   }
 
@@ -613,6 +639,7 @@ typedef struct
   int lstpos;
   bedreglist_t *tar;
   bedreglist_t *flk;
+  bedreglist_t *ucreg;
   count32_t *depvals_of_chr;
   char *name;
   struct depnode *tgt_node;
@@ -632,6 +659,7 @@ loopbams_parameters_t * init_loopbams_parameters()
   para->lstpos = 0;
   para->tar = NULL;
   para->flk = NULL;
+  para->ucreg = NULL;
   para->depvals_of_chr = NULL;
   para->name = NULL;
   para->tgt_node = NULL;
@@ -640,6 +668,7 @@ loopbams_parameters_t * init_loopbams_parameters()
   para->rcov = (kstring_t*)needmem(sizeof(kstring_t));
   para->pdepths->l = para->pdepths->m = 0;
   para->rcov->l = para->rcov->m = 0;
+  if (outdir) chdir(outdir);
   para->fdep = bgzf_open("depth.tsv.gz", "w");
   if (isNull(para->fdep))
     errabort("failed to open file depth.tsv.gz");
@@ -651,8 +680,8 @@ loopbams_parameters_t * init_loopbams_parameters()
 
 int close_loopbam_parameters(loopbams_parameters_t *para)
   {
-  if (para->tgt_node) errabort("target node is still reachable");
-  if (para->flk_node) errabort("flank node is still reachable");
+  if (para->tgt_node) errabort("[close loopbam] target node is still reachable");
+  if (para->flk_node) errabort("[close loopbam] flank node is still reachable");
   freemem(para->pdepths->s);
   freemem(para->rcov->s);
   mustfree(para->pdepths);
@@ -681,6 +710,9 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
   if (isNull(node)) return 0;
   int j;
   float avg, med, cov1, cov2;
+  int lst_start = 0; // uncover region start
+  int lst_stop = 0; // uncover region stop
+  
   if (node->len)
     {
     avg = avg_cal(node->vals, node->len);
@@ -693,19 +725,39 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
 	       para->name, node->start + j, node->vals[j], node->rmdupdep[j], node->covdep[j]);
       // count_increase will alloc memory space automatically
       // use covdep to calculate coverage and averge depth
-      count_increase(para->depvals_of_chr, node->covdep[j], uint32_t); 
+      count_increase(para->depvals_of_chr, node->covdep[j], uint32_t);
+
+      /* store the uncover region */
+      if (node->covdep[j] < uncover_cutoff)
+	{
+	if (isZero(lst_start))
+	  {
+	  lst_start = node->start+j;
+	  lst_stop = lst_start;
+	  }
+	else
+	  lst_stop = node->start+j;
+	}
+      else if (lst_start > 0)
+	{
+	push_bedreg(para->ucreg, lst_start, lst_stop);
+	lst_start = 0;
+	}
       }
+    if (lst_start > 0)
+      	push_bedreg(para->ucreg, lst_start, lst_stop);
     }
   else
     {
     avg = med = cov1 = cov2 = 0.0;
     for (j = 0; j < node->len; ++j)
       ksprintf(para->pdepths, "%s\t%d\t0\t0\t0\n", para->name, node->start+j);
+    push_bedreg(para->ucreg, node->start, node->stop); // store uncover region
     count_increaseN(para->depvals_of_chr, 0, node->len, uint32_t);
     }
   //ksprintf(para->pdepths,"\n");
   count_increase(a->c_reg, (int)avg, uint32_t);
-  ksprintf(para->rcov,"%s\t%u\t%u\t%.2f\t%.1f\t%.4f\t%.f\n",
+  ksprintf(para->rcov,"%s\t%u\t%u\t%.2f\t%.1f\t%.2f\t%.2f\n",
 	   para->name, node->start, node->stop, avg, med, cov1, cov2);
   if (para->pdepths->l > WINDOW_SIZE) write_buffer_bgzf(para->pdepths, para->fdep);
   if (para->rcov->l > WINDOW_SIZE) write_buffer_bgzf(para->rcov, para->freg);
@@ -755,15 +807,25 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
   return 1;
   }
 
+void write_unover_file(loopbams_parameters_t *para)
+  {
+  if (outdir) chdir(outdir);
+  bedHand->merge(h_uncov);
+  bedHand->save("uncover.bed", h_uncov);
+  bedHand->destroy(h_uncov, destroy_void);
+  }
+
 // load bam files and stat the depths
 // huge function, need IMPROVE it!!
 int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   {
   // get the chromosome name from header
   bam_header_t *h = a->h;
-  loopbams_parameters_t *para = init_loopbams_parameters(); 
-  if (f->outdir) chdir(f->outdir); // FIXME: if there is no such dir
-  
+  loopbams_parameters_t *para = init_loopbams_parameters();
+  ksprintf(para->pdepths, "#Chr\tPos\tRaw Depth\tRmdup depth\tCover depth\n");
+  ksprintf(para->rcov, "#Chr\tStart\tStop\tAvg depth\tMedian\tCoverage\tCoverage(FIX)\n");
+  if (outdir) chdir(outdir); // FIXME: if there is no such dir
+  h_uncov = kh_init(reg);  
   int i;
   for (i = 0; i < a->ndata; ++i)
     {
@@ -870,6 +932,15 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	para->tgt_node = bed_depnode_list(para->tar);
 	para->flk_node = bed_depnode_list(para->flk);
 	para->tar->flag = para->flk->flag =1;
+
+	/* the next part is init uncover region hash*/
+	k = kh_put(reg, h_uncov, strdup(para->name), &ret);
+	bedreglist_t *ucreg_tmp;
+	ucreg_tmp = (bedreglist_t*)needmem(sizeof(bedreglist_t));
+	kh_val(h_uncov, k) = *ucreg_tmp;
+	para->ucreg = ucreg_tmp;
+	/* finish init */
+	
 	}
       while (para->flk_node && para->flk_node->stop < para->lstpos+1)
 	stat_flk_depcnt(para, a);
@@ -888,6 +959,8 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     bgzf_close(a->data[i]);
     }
   check_reachable_regions(para, a);
+
+  write_unover_file(para);
   write_buffer_bgzf(para->pdepths, para->fdep);
   write_buffer_bgzf(para->rcov, para->freg);
   close_loopbam_parameters(para);
@@ -920,6 +993,7 @@ void cntcov_cal(struct opt_aux *f,
   cov->cov30 = cov->cov100 = cov->covx = 0;
   for (i = 0; i < cnt->m; ++i)
     rawcnt += cnt->a[i];
+  if (rawcnt == 0) return;
   for (i = 0; i < cnt->m; ++i)
     {
     (*data) += cnt->a[i] * i;
@@ -944,18 +1018,19 @@ void cntcov_cal(struct opt_aux *f,
   cov->cnt10 = rawcnt - cov->cnt10;
   cov->cnt30 = rawcnt - cov->cnt30;
   cov->cnt100 = rawcnt - cov->cnt100;
-  cov->cov = (float)cov->cnt / rawcnt;
-  cov->cov4 = (float)cov->cnt4 / rawcnt;
-  cov->cov10 = (float)cov->cnt10 / rawcnt;
-  cov->cov30 = (float)cov->cnt30 / rawcnt;
-  cov->cov100 = (float)cov->cnt100 / rawcnt;
+  cov->cov = (float)cov->cnt / rawcnt * 100;
+  cov->cov4 = (float)cov->cnt4 / rawcnt *100;
+  cov->cov10 = (float)cov->cnt10 / rawcnt * 100;
+  cov->cov30 = (float)cov->cnt30 / rawcnt *100;
+  cov->cov100 = (float)cov->cnt100 / rawcnt*100;
   if (f->cutoff)
     {
     cov->cntx = rawcnt - cov->cntx;
-    cov->covx = (float)cov->cntx / rawcnt;
+    cov->covx = (float)cov->cntx / rawcnt*100;
     }
   }
 
+// need improve soon!!!
 float median_cnt(count32_t *cnt)
   {
   int i;
@@ -968,12 +1043,13 @@ float median_cnt(count32_t *cnt)
     num += (uint64_t)cnt->a[i];
     if (num >= med) return (float)i;
     }
+  return 0;
   }
 
 int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   {
   int i;
-  if (f->outdir) chdir(f->outdir);
+  if (outdir) chdir(outdir);
   FILE *finsert;
   FILE *fdep;
   finsert = open_wfile("insertsize.plot");
@@ -989,7 +1065,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   for (i = 0; i < a->c_isize->m; ++i)
     {
     icumu -= a->c_isize->a[i];
-    fprintf(finsert, "%d\t%d\t%f\t%d\t%f\n",
+    fprintf(finsert, "%d\t%u\t%f\t%lu\t%f\n",
 	    i, a->c_isize->a[i], (float)a->c_isize->a[i] / icnt, icumu, (float)icumu/ icnt );
     }
 
@@ -998,7 +1074,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   for (i = 0; i < a->c_dep->m; ++i)
     {
     dcumu -= a->c_dep->a[i];
-    fprintf(fdep, "%d\t%d\t%f\t%d\t%f\n",
+    fprintf(fdep, "%d\t%u\t%f\t%lu\t%f\n",
 	    i, a->c_dep->a[i], (float)a->c_dep->a[i] / dcnt, dcumu, (float)dcumu/dcnt);
     }
   fclose(fdep);
@@ -1012,7 +1088,8 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 
   FILE *fchrcov = open_wfile("chromosomes.report");
   {
-  fprintf(fchrcov, "#Chromosome\tDATA(%)\tAvg depth\tMedian depth\tCoverage\tCov 4x\tCov 10x\tCov 30x\tCov 100x");
+  fprintf(fchrcov, "%11s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s",
+	  "#Chromosome","DATA(%)","Avg depth","Median","Coverage%","Cov 4x %","Cov 10x %","Cov 30x %","Cov 100x %");
   if(f->cutoff) fprintf(fchrcov, "Cov %dx", f->cutoff);
   fprintf(fchrcov,"\n");
   khiter_t k;
@@ -1028,12 +1105,22 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
       uint64_t length = 0;
       int i;
       for (i = 0; i < cnt->m; ++i) length += cnt->a[i];
-      float avg = (float)data/ length;
-      float med = median_cnt(cnt);
-      float per = (float)data/fs->n_tdata*100.0;
-      fprintf(fchrcov, "%s\t%.4f\t%.4f\t%.1f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f",
+      float avg, med, per;
+      if (data > 0)
+	{
+	avg = (float)data/ length;
+	med = median_cnt(cnt);
+	per = (float)data/fs->n_tdata*100.0;
+	fprintf(fchrcov, "%11s\t%8.2f\t%8.2f\t%9.1f\t%8.2f\t%8.2f\t%8.2f\t%8.2f\t%8.2f",
 	      name, per, avg, med, chrcov->cov, chrcov->cov4, chrcov->cov10, chrcov->cov30, chrcov->cov100);
-      if (f->cutoff) fprintf(fchrcov, "%.2f", chrcov->covx);
+	if (f->cutoff) fprintf(fchrcov, "%.2f", chrcov->covx);
+	}
+      else
+	{
+	fprintf(fchrcov, "%11s\t%8.2f\t%8.2f\t%8.1f\t%8.1f\t%8.1f\t%8.1f\t%8.1f\t%8.1f",
+		name, (float)0, (float)0, (float)0, (float)0, (float)0, (float)0, (float)0, (float)0);
+	if (f->cutoff) fprintf(fchrcov, "%5.4f", (float)0);
+	}
       fprintf(fchrcov, "\n");
       }
     }
@@ -1041,68 +1128,73 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   fclose(fchrcov);
   FILE *fc = open_wfile("coverage.report");       
   do
-    {	
-    fprintf(fc, "%60s\t%llu\n", report_total[0], fs->n_reads);
-    fprintf(fc, "%60s\t%llu\n", report_total[1], fs->n_qcfail);
+    {
+    fprintf(fc, "## The file was created by %s", program_name);
+    fprintf(fc, "## Version : %s\n", Version);
+    fprintf(fc, "## Files : ");
+    for (i = 0;  i < f->nfiles; ++i) fprintf(fc, "%s ", f->inputs[i]);
+    fprintf(fc, "\n");
+    fprintf(fc, "%60s\t%lu\n", report_total[0], fs->n_reads);
+    fprintf(fc, "%60s\t%lu\n", report_total[1], fs->n_qcfail);
     fprintf(fc, "%60s\t%.2f\n", report_total[2], (float)fs->n_data / 1e6);
-    fprintf(fc, "%60s\t%llu\n", report_total[3], fs->n_pair_all);
-    fprintf(fc, "%60s\t%llu\n", report_total[4], fs->n_mapped);
-    fprintf(fc, "%60s\t%.2f\n", report_total[5], (float)fs->n_mapped / fs->n_reads);
+    fprintf(fc, "%60s\t%lu\n", report_total[3], fs->n_pair_all);
+    fprintf(fc, "%60s\t%lu\n", report_total[4], fs->n_mapped);
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[5], (float)fs->n_mapped / fs->n_reads *100);
     fprintf(fc, "%60s\t%.2f\n", report_total[6], fs->n_mdata / 1e6);
-    fprintf(fc, "%60s\t%.2f\n", report_total[7], (float)fs->n_mdata / fs->n_data);
-    fprintf(fc, "%60s\t%llu\n", report_total[8], fs->n_pair_good);
-    fprintf(fc, "%60s\t%.2f\n", report_total[7], (float)fs->n_pair_good / fs->n_reads);
-    fprintf(fc, "%60s\t%llu\n", report_total[9], fs->n_pair_map);
-    fprintf(fc, "%60s\t%.2f\n", report_total[10], (float)fs->n_pair_map / fs->n_reads);
-    fprintf(fc, "%60s\t%llu\n", report_total[11], fs->n_sgltn);
-    fprintf(fc, "%60s\t%llu\n", report_total[13], fs->n_diffchr);
-    fprintf(fc, "%60s\t%llu\n", report_total[14], fs->n_read1);
-    fprintf(fc, "%60s\t%llu\n", report_total[15], fs->n_read2);
-    fprintf(fc, "%60s\t%llu\n", report_total[16], fs->n_pstrand);
-    fprintf(fc, "%60s\t%llu\n", report_total[17], fs->n_mstrand);
-    fprintf(fc, "%60s\t%llu\n", report_total[18], fs->n_dup);
-    fprintf(fc, "%60s\t%.2f\n", report_total[19], (float)fs->n_dup / fs->n_reads);
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_mdata / fs->n_data *100);
+    fprintf(fc, "%60s\t%lu\n", report_total[8], fs->n_pair_good);
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_pair_good / fs->n_reads *100);
+    fprintf(fc, "%60s\t%lu\n", report_total[9], fs->n_pair_map);
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[10], (float)fs->n_pair_map / fs->n_reads *100);
+    fprintf(fc, "%60s\t%lu\n", report_total[11], fs->n_sgltn);
+    fprintf(fc, "%60s\t%lu\n", report_total[13], fs->n_diffchr);
+    fprintf(fc, "%60s\t%lu\n", report_total[14], fs->n_read1);
+    fprintf(fc, "%60s\t%lu\n", report_total[15], fs->n_read2);
+    fprintf(fc, "%60s\t%lu\n", report_total[16], fs->n_pstrand);
+    fprintf(fc, "%60s\t%lu\n", report_total[17], fs->n_mstrand);
+    fprintf(fc, "%60s\t%lu\n", report_total[18], fs->n_dup);
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[19], (float)fs->n_dup / fs->n_reads *100);
     fprintf(fc, "%60s\t%d\n", report_total[20], f->mapQ_lim);
-    fprintf(fc, "%60s\t%llu\n", report_total[21], fs->n_qual);
-    fprintf(fc, "%60s\t%.2f\n", report_total[22], (float)fs->n_qual / fs->n_reads);
-    fprintf(fc, "%60s\t%.2f\n", report_total[23], (float)fs->n_qual / fs->n_mapped);
+    fprintf(fc, "%60s\t%lu\n", report_total[21], fs->n_qual);
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[22], (float)fs->n_qual / fs->n_reads * 100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[23], (float)fs->n_qual / fs->n_mapped *100);
     //tgt
-    fprintf(fc, "%60s\t%llu\n", report_tar[0], fs->n_tgt);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[1], (float)fs->n_tgt / fs->n_reads);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[2], (float)fs->n_tgt / fs->n_mapped);
+    fprintf(fc, "%60s\t%lu\n", report_tar[0], fs->n_tgt);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[1], (float)fs->n_tgt / fs->n_reads *100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[2], (float)fs->n_tgt / fs->n_mapped*100);
     fprintf(fc, "%60s\t%.2f\n", report_tar[3], (float)fs->n_tdata / 1e6);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[4], (float)fs->n_tdata / fs->n_data);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[5], (float)fs->n_tdata / fs->n_mdata);
-    fprintf(fc, "%60s\t%llu\n", report_tar[6], a->tgt_len);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[4], (float)fs->n_tdata / fs->n_data *100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[5], (float)fs->n_tdata / fs->n_mdata*100);
+    fprintf(fc, "%60s\t%lu\n", report_tar[6], a->tgt_len);
     fprintf(fc, "%60s\t%.2f\n", report_tar[7], (float)fs->n_tdata / a->tgt_len);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[8], tarcov->cov);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[9], tarcov->cov4);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[10], tarcov->cov10);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[11], tarcov->cov30);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[12], tarcov->cov100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[8], tarcov->cov);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[9], tarcov->cov4);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[10], tarcov->cov10);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[11], tarcov->cov30);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[12], tarcov->cov100);
     //tgt regions
     fprintf(fc, "%60s\t%u\n", report_tar[13], a->tgt_nreg);
-    fprintf(fc, "%60s\t%llu\n", report_tar[14], regcov->cnt);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[15], regcov->cov);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[16], regcov->cov4);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[17], regcov->cov10);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[18], regcov->cov30);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[19], regcov->cov100);
+    fprintf(fc, "%60s\t%lu\n", report_tar[14], regcov->cnt);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[15], regcov->cov);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[16], regcov->cov4);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[17], regcov->cov10);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[18], regcov->cov30);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[19], regcov->cov100);
     //flk
     fprintf(fc, "%60s\t%u\n", report_tar[20], flank_reg);
-    fprintf(fc, "%60s\t%llu\n", report_tar[21], a->flk_len);
+    fprintf(fc, "%60s\t%lu\n", report_tar[21], a->flk_len);
     fprintf(fc, "%60s\t%.2f\n", report_tar[22], (float)fs->n_fdata / a->flk_len);
-    fprintf(fc, "%60s\t%llu\n", report_tar[23], fs->n_flk);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[24], (float)fs->n_flk / fs->n_reads);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[25], (float)fs->n_flk / fs->n_mapped);
+    fprintf(fc, "%60s\t%lu\n", report_tar[23], fs->n_flk);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[24], (float)fs->n_flk / fs->n_reads *100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[25], (float)fs->n_flk / fs->n_mapped*100);
     fprintf(fc, "%60s\t%.2f\n", report_tar[26], (float)fs->n_fdata / 1e6);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[27], (float)fs->n_fdata / fs->n_data);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[28], (float)fs->n_fdata / fs->n_mdata);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[29], flkcov->cov);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[30], flkcov->cov4);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[31], flkcov->cov10);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[32], flkcov->cov30);
-    fprintf(fc, "%60s\t%.4f\n", report_tar[33], flkcov->cov100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[27], (float)fs->n_fdata / fs->n_data *100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[28], (float)fs->n_fdata / fs->n_mdata*100);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[29], flkcov->cov);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[30], flkcov->cov4);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[31], flkcov->cov10);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[32], flkcov->cov30);
+    fprintf(fc, "%60s\t%.2f%%\n", report_tar[33], flkcov->cov100);
     }
   while(0);
   
@@ -1118,6 +1210,7 @@ enum
   MAXDEPTH,
   CUTOFF,
   INSERTSIZE,
+  UNCOVER,
   HELP
   };
 
@@ -1130,6 +1223,7 @@ static struct option const long_opts[] =
   {"cutoffdepth", required_argument, NULL, CUTOFF},
   {"isize", required_argument, NULL, INSERTSIZE},
   {"mapthres", required_argument, NULL, 'q'},
+  {"uncover", required_argument, NULL, UNCOVER},
   //{"rmdup", no_argument, NULL, 'd'},
   {"help", no_argument, NULL, 'h'}
   };
@@ -1145,7 +1239,7 @@ int bamdst(int argc, char *argv[])
     switch (n)
       {
       //output dir, must have right to write
-      case 'o': opt->outdir = strdup(optarg); break;
+      case 'o': outdir = strdup(optarg); break;
 	//capture region or just the region you interesting
       case 'p': probe = strdup(optarg); break;
 	//flk the region for more information, default is 200 bp
@@ -1153,6 +1247,8 @@ int bamdst(int argc, char *argv[])
 	//max depth to considered in the cumulative distribution of depths
       case MAXDEPTH: opt->maxdepth = atoi(optarg); break;
       case CUTOFF: opt->cutoff = atoi(optarg); break;
+	// uncover_cutoff must be greater than 0
+      case UNCOVER: uncover_cutoff = atoi(optarg); assert(uncover_cutoff > 0); break;
       case INSERTSIZE: opt->isize_lim = atoi(optarg); break;
       case 'q': opt->mapQ_lim = atoi(optarg); break;
       case 'h': usage(1); break;
@@ -1162,7 +1258,7 @@ int bamdst(int argc, char *argv[])
       }
 		
     }
-  if (isNull(opt->outdir) || isNull(probe))
+  if (isNull(outdir) || isNull(probe))
     usage(0);
   n = argc - optind;
   //capable of deals with severl bam files
@@ -1215,6 +1311,7 @@ int bamdst(int argc, char *argv[])
   mustfree(fs);
   aux_destroy(aux);
   opt_destroy(opt);
+  
   return 1;
   }
 
@@ -1222,5 +1319,6 @@ int bamdst(int argc, char *argv[])
 int main(int argc, char *argv[])
   {
   bamdst(argc, argv);
+  freemem(outdir);
   return 1;
   }
