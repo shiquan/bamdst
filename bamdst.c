@@ -1075,9 +1075,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     }
   fclose(fdep);
   fclose(finsert);
-  uint64_t target_cnt;
-  target_cnt = cntcov_cal(f, tarcov, a->c_dep, &fs->n_tdata);
-  debug("region_length: %lu\n", target_cnt);
+  cntcov_cal(f, tarcov, a->c_dep, &fs->n_tdata);
   cntcov_cal(f, regcov, a->c_reg, &fs->n_fdata);
   //merge_cnt(a->c_flkdep, a->c_dep);
   cntcov_cal(f, flkcov, a->c_flkdep, &fs->n_fdata);
