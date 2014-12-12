@@ -103,14 +103,14 @@ count64_t;
      memset((c)->a, 0, (c)->n *sizeof(type));			\
      }								\
    }								\
- if((c)->n <= d)						\
+ if((c)->n <= d+1)						\
    {								\
-   (c)->n = d<<1;						\
+   (c)->n = (d+1)<<1;						\
    (c)->a = realloc((c)->a, sizeof(type) *(c)->n);		\
    memset((c)->a+(c)->m, 0, ((c)->n - (c)->m)*sizeof(type));	\
    (c)->m = d+1;						\
    }								\
- else if((c)->m < d) (c)->m = d+1;				\
+ else if((c)->m < d+1) (c)->m = d+1;				\
  (c)->a[d]++;							\
  } while(0)
 
@@ -124,17 +124,17 @@ count64_t;
    }						\
  } while(0);
 
-#define count_increaseN(c, d, cnt, type) do {		\
- if((c)->n <= d)					\
-   {							\
-   (c)->n = d<<1;					\
-   (c)->a = realloc((c)->a, sizeof(type) *(c)->n);	\
-   int i;						\
-   for (i = (c)->m; i < (c)->n; ++i)	(c)->a[i] = 0;	\
-   (c)->m = d;						\
-   }							\
- else if((c)->m < d) (c)->m = d;			\
- (c)->a[d] += cnt;					\
+#define count_increaseN(c, d, cnt, type) do {			\
+ if((c)->n <= d+1)						\
+   {								\
+   (c)->n = (d+1)<<1;						\
+   (c)->a = realloc((c)->a, sizeof(type) *(c)->n);		\
+   int i;							\
+   memset((c)->a+(c)->m, 0, ((c)->n - (c)->m)* sizeof(type));	\
+   (c)->m = d+1;						\
+   }								\
+ else if((c)->m < d+1) (c)->m = d+1;				\
+ (c)->a[d] += cnt;						\
  } while(0)
 
 #endif

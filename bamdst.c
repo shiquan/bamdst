@@ -71,6 +71,11 @@ static int uncover_cutoff = 5;
 // init hash struct to store uncover regions
 regHash_t *h_uncov;
 
+void h_uncov_init()
+  {
+  h_uncov = kh_init(reg);
+  }
+
 struct opt_aux
   {
   int nfiles;
@@ -197,8 +202,7 @@ bed_depnode_list(bedreglist_t *bed)
 
     /* the length of this region should be zero if not allocated memory yet
     *  Assign the length value when init the vals and cnts */
-    node->len = 0; 
-    
+    node->len = 0;     
     node->vals = NULL;
     node->cnts = NULL;
     node->rmdupdep = NULL;
@@ -293,8 +297,7 @@ typedef struct
   /* delete n_uniq
    * ref:  https://www.biostars.org/p/59281/ */
   uint64_t n_tgt, n_flk, n_tdata, n_fdata;
-  }
-bamflag_t;
+  } bamflag_t;
 
 bamflag_t *bamflag_init()
   {
@@ -537,8 +540,7 @@ int push_bedreg(bedreglist_t *bed, uint32_t begin, uint32_t end)
     bed->n = bed->m << 1;
     bed->a = (uint64_t*)enlarge_empty_mem((void*)bed->a, bed->m * sizeof(uint64_t), bed->n *sizeof(uint64_t));
     }
-  bed->a[bed->m] = (uint64_t)begin << 32 | (uint32_t)end;
-  bed->m++;
+  bed->a[bed->m++] = (uint64_t)begin << 32 | (uint32_t)end;
   return 1;
   }
 
@@ -648,8 +650,7 @@ typedef struct
   kstring_t *rcov;
   BGZF *fdep; // write depth to this file
   BGZF *freg; // write coverage of each region to this file
-  }
-loopbams_parameters_t;
+  } loopbams_parameters_t;
 
 loopbams_parameters_t * init_loopbams_parameters()
   {
@@ -710,8 +711,8 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
   if (isNull(node)) return 0;
   int j;
   float avg, med, cov1, cov2;
-  int lst_start = 0; // uncover region start
-  int lst_stop = 0; // uncover region stop
+  uint32_t lst_start = 0; // uncover region start
+  uint32_t lst_stop = 0; // uncover region stop
   
   if (node->len)
     {
@@ -726,11 +727,11 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
       // count_increase will alloc memory space automatically
       // use covdep to calculate coverage and averge depth
       count_increase(para->depvals_of_chr, node->covdep[j], uint32_t);
-
+      count_increase(a->c_dep, node->covdep[j], uint32_t);
       /* store the uncover region */
       if (node->covdep[j] < uncover_cutoff)
 	{
-	if (isZero(lst_start))
+	if (isZero(lst_start) && isZero(lst_stop))
 	  {
 	  lst_start = node->start+j;
 	  lst_stop = lst_start;
@@ -742,10 +743,14 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
 	{
 	push_bedreg(para->ucreg, lst_start, lst_stop);
 	lst_start = 0;
+	lst_stop = 0;
 	}
       }
     if (lst_start > 0)
-      	push_bedreg(para->ucreg, lst_start, lst_stop);
+      {
+      push_bedreg(para->ucreg, lst_start, lst_stop);
+      //fprintf(stderr, "%u\t%u\n", lst_start, lst_stop);
+      }
     }
   else
     {
@@ -754,6 +759,7 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
       ksprintf(para->pdepths, "%s\t%d\t0\t0\t0\n", para->name, node->start+j);
     push_bedreg(para->ucreg, node->start, node->stop); // store uncover region
     count_increaseN(para->depvals_of_chr, 0, node->len, uint32_t);
+    count_increaseN(a->c_dep, 0, node->len, uint32_t);
     }
   //ksprintf(para->pdepths,"\n");
   count_increase(a->c_reg, (int)avg, uint32_t);
@@ -785,7 +791,7 @@ int check_reachable_regions(loopbams_parameters_t *para, aux_t *a)
 	stat_each_region(para, a);
 	del_node(para->tgt_node); // no need allocate memory for these nodes
 	}
-      count_merge(a->c_dep, para->depvals_of_chr, uint32_t);
+      //count_merge(a->c_dep, para->depvals_of_chr, uint32_t);
       while(para->flk_node)
 	{
 	count_increaseN(a->c_flkdep, 0, para->flk_node->len, uint32_t);
@@ -807,7 +813,7 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
   return 1;
   }
 
-void write_unover_file(loopbams_parameters_t *para)
+void write_unover_file()
   {
   if (outdir) chdir(outdir);
   bedHand->merge(h_uncov);
@@ -824,8 +830,10 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   loopbams_parameters_t *para = init_loopbams_parameters();
   ksprintf(para->pdepths, "#Chr\tPos\tRaw Depth\tRmdup depth\tCover depth\n");
   ksprintf(para->rcov, "#Chr\tStart\tStop\tAvg depth\tMedian\tCoverage\tCoverage(FIX)\n");
-  if (outdir) chdir(outdir); // FIXME: if there is no such dir
-  h_uncov = kh_init(reg);  
+  if (outdir) chdir(outdir); // FIXME: if there is no such dir?
+  
+  //h_uncov = kh_init(reg);
+  h_uncov_init();
   int i;
   for (i = 0; i < a->ndata; ++i)
     {
@@ -901,8 +909,8 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	    }
 	  }
 
-	if (para->tid >= 0) // add the depth counts of each chromosome to target counts
-	  count_merge(a->c_dep, para->depvals_of_chr, uint32_t);
+	//if (para->tid >= 0) // add the depth counts of each chromosome to target counts
+	//count_merge(a->c_dep, para->depvals_of_chr, uint32_t);
 
 	para->tid = c->tid;
 	para->name = h->target_name[c->tid];
@@ -935,10 +943,11 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 
 	/* the next part is init uncover region hash*/
 	k = kh_put(reg, h_uncov, strdup(para->name), &ret);
+	//fprintf(stderr,"k: %d\n", k);
 	bedreglist_t *ucreg_tmp;
 	ucreg_tmp = (bedreglist_t*)needmem(sizeof(bedreglist_t));
 	kh_val(h_uncov, k) = *ucreg_tmp;
-	para->ucreg = ucreg_tmp;
+	para->ucreg = &kh_val(h_uncov, k); // FIXME: I don't understand why couldn't use ucreg_tmp directly
 	/* finish init */
 	
 	}
@@ -959,8 +968,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     bgzf_close(a->data[i]);
     }
   check_reachable_regions(para, a);
-
-  write_unover_file(para);
+  write_unover_file();
   write_buffer_bgzf(para->pdepths, para->fdep);
   write_buffer_bgzf(para->rcov, para->freg);
   close_loopbam_parameters(para);
@@ -981,38 +989,25 @@ regcov_init()
   return c;
   }
  
-void cntcov_cal(struct opt_aux *f,
+uint64_t cntcov_cal(struct opt_aux *f,
 		struct regcov * cov, count32_t * cnt, uint64_t *data)
   {
   uint64_t rawcnt = 0;
   int i;
   *data = 0;
-  cov->cnt = cov->cnt4 = cov->cnt10 = 0;
-  cov->cnt30 = cov->cnt100 = cov->cntx = 0;
-  cov->cov = cov->cov4 = cov->cov10 = 0;
-  cov->cov30 = cov->cov100 = cov->covx = 0;
-  for (i = 0; i < cnt->m; ++i)
-    rawcnt += cnt->a[i];
-  if (rawcnt == 0) return;
+  cov->cnt = cov->cnt4 = cov->cnt10 = cov->cnt30 = cov->cnt100 = cov->cntx = 0;
+  cov->cov = cov->cov4 = cov->cov10 = cov->cov30 = cov->cov100 = cov->covx = 0;
   for (i = 0; i < cnt->m; ++i)
     {
     (*data) += cnt->a[i] * i;
-    if (i < 100)
-      {
-      cov->cnt100 += cnt->a[i];
-      if (i < 30)
-	{
-	cov->cnt30 += cnt->a[i];
-	if (i < 10)
-	  {
-	  cov->cnt10 += cnt->a[i];
-	  if (i < 4) cov->cnt4 += cnt->a[i];
-	  }
-	}
-      } //faster
-    if (f->cutoff && i < f->cutoff)
-      cov->cntx += cnt->a[i];
+    rawcnt += cnt->a[i];
+    if (i < 100) cov->cnt100 += cnt->a[i];
+    if (i < 30)  cov->cnt30 += cnt->a[i];
+    if (i < 10)  cov->cnt10 += cnt->a[i];
+    if (i < 4) cov->cnt4 += cnt->a[i];
+    if (f->cutoff && i < f->cutoff) cov->cntx += cnt->a[i];
     }
+  if (rawcnt == 0) return 0;
   cov->cnt = rawcnt - (uint64_t)cnt->a[0];
   cov->cnt4 = rawcnt - cov->cnt4;
   cov->cnt10 = rawcnt - cov->cnt10;
@@ -1028,6 +1023,7 @@ void cntcov_cal(struct opt_aux *f,
     cov->cntx = rawcnt - cov->cntx;
     cov->covx = (float)cov->cntx / rawcnt*100;
     }
+  return rawcnt;
   }
 
 // need improve soon!!!
@@ -1079,12 +1075,12 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     }
   fclose(fdep);
   fclose(finsert);
-  
-  cntcov_cal(f, tarcov, a->c_dep, &fs->n_tdata);
+  uint64_t target_cnt;
+  target_cnt = cntcov_cal(f, tarcov, a->c_dep, &fs->n_tdata);
+  debug("region_length: %lu\n", target_cnt);
   cntcov_cal(f, regcov, a->c_reg, &fs->n_fdata);
   //merge_cnt(a->c_flkdep, a->c_dep);
   cntcov_cal(f, flkcov, a->c_flkdep, &fs->n_fdata);
-
 
   FILE *fchrcov = open_wfile("chromosomes.report");
   {
