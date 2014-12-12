@@ -222,7 +222,8 @@ static bedreglist_t * regcore_uniq(bedreglist_t * bed1, bedreglist_t * bed2)
   int i= 0, j = 0;
   bedreglist_t * bed = bed_directadd(bed1, bed2);
   sort_reg(bed);
-  uint32_t lastbeg = 0, lastend = 0;
+  uint32_t lastbeg = 0;
+  uint32_t lastend = 0;
   uint64_t *b;
   b = (uint64_t*)needmem((bed->m+1) * sizeof(uint64_t));
   for (i = 0; i < bed->m; ++i)

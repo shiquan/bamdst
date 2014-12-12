@@ -66,25 +66,6 @@ count64_t;
  for (i = 0; i < (c)->n; ++i) (c)->a[i] = 0;	\
  } while(0)
 
-// add countB to countA
-/* #define count_merge(ca, cb, type) do {				\ */
-/*  int i;								\ */
-/*  if ((ca)->m < (cb)->m)						\ */
-/*    {								\ */
-/*    (ca)->n = (cb)->m + 1;						\ */
-/*    if ((ca)->m)								\ */
-/*      {									\ */
-/*      (ca)->a = realloc((ca)->a, (ca)->n * sizeof(type));		\ */
-/*      }									\ */
-/*    else									\ */
-/*      {									\ */
-/*      (ca)->a = malloc((ca)->n * sizeof(type));				\ */
-/*      }									\ */
-/*    memset((ca)->a + (ca)->m, 0, ((ca)->n-(ca)->m)*sizeof(type));	\ */
-/*    (ca)->m = (cb)->m;							\ */
-/*    }									\ */
-/*  for (i = 0; i < (cb)->m; ++i)	(ca)->a[i] += (cb)->a[i];		\ */
-/*  } while(0) */
 
 // increase c once in postion d
 #define count_increase(c, d, type) do {				\
@@ -129,7 +110,6 @@ count64_t;
    {								\
    (c)->n = (d+1)<<1;						\
    (c)->a = realloc((c)->a, sizeof(type) *(c)->n);		\
-   int i;							\
    memset((c)->a+(c)->m, 0, ((c)->n - (c)->m)* sizeof(type));	\
    (c)->m = d+1;						\
    }								\

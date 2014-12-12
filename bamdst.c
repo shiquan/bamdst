@@ -302,7 +302,7 @@ typedef struct
 bamflag_t *bamflag_init()
   {
   bamflag_t *fs = (bamflag_t*)needmem(sizeof(bamflag_t));
-  fs->n_reads = fs->n_mapped = fs->n_pair_good = fs->n_pair_good = 0;
+  fs->n_reads = fs->n_mapped = fs->n_pair_all = fs->n_pair_good = 0;
   fs->n_sgltn = fs->n_read1 = fs->n_read2 = fs->n_pair_map = 0;
   fs->n_dup = fs->n_diffchr = fs->n_pstrand = fs->n_mstrand = 0;
   fs->n_qcfail = fs->n_data = fs->n_mdata = fs->n_qual = 0;
