@@ -457,7 +457,7 @@ static float coverage_cal(const uint32_t * array, int l)
   }
 
 // ugly report!!! 
-const static char *report_total[] =
+static char const * const report_total[] =
   {
   "[Total] Raw Reads (All reads)", "[Total] QC Fail reads",
   "[Total] Raw Data(Mb)",
@@ -476,7 +476,7 @@ const static char *report_total[] =
   "[Total] Fraction of MapQ reads in mapped reads"
   };
 
-const static char *report_tar[] =
+static char const * const report_tar[] =
   {
   "[Target] Target Reads", "[Target] Fraction of Target Reads in all reads",
   "[Target] Fraction of Target Reads in mapped reads",
@@ -586,7 +586,7 @@ int match_pos(struct depnode * header, uint32_t pos, cntstat_t state)
 /* when deal with a read struct, check the begin of this read and the last position 
  * of this read, if this read is overlap with target region, sum up the depth of
  * each related position */
-int readcore(struct depnode * header, bam1_t * b, cntstat_t state)
+int readcore(struct depnode * header, bam1_t const * b, cntstat_t state)
   {
   struct depnode *tmp = header;
   int i;
