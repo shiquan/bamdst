@@ -591,7 +591,7 @@ int readcore(struct depnode * header, bam1_t const * b, cntstat_t state)
   struct depnode *tmp = header;
   int i;
   bam1_core_t *c = &b->core;
-  if (c->pos < tmp->start) return 0;
+  //if (c->pos < tmp->start) return 0;
   while (tmp && c->pos > tmp->stop)
     {
     tmp = tmp->next;
