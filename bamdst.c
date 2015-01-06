@@ -470,7 +470,7 @@ static char const * const report_tar[] =
   "[Target] Fraction Region covered >= 30x",
   //"[Target] Region covered >= 100x",
   "[Target] Fraction Region covered >= 100x",
-  "[flank] flank size", "[flank] Len of region", "[flank] Average depth",
+  "[flank] flank size", "[flank] Len of region (not include target region)", "[flank] Average depth",
   "[flank] flank Reads", "[flank] Fraction of flank Reads in all reads",
   "[flank] Fraction of flank Reads in mapped reads",
   "[flank] flank Data(Mb)",
@@ -489,7 +489,8 @@ int load_bed_init(char const *fn, aux_t * a)
   inf_t *inf1 = bedHand->stat(a->h_tgt);
   a->tgt_len = inf1->length;
   a->tgt_nreg = inf1->total;
-  bedHand->read(fn, a->h_flk, flank_reg, flank_reg);
+  if (zero_based) bedHand->read(fn, a->h_flk, flank_reg-1, flank_reg);
+  else bedHand->read(fn, a->h_flk, flank_reg, flank_reg);
   bedHand->merge(a->h_flk);
   bedHand->diff(a->h_flk, a->h_tgt);
   inf_t *inf2 = bedHand->stat(a->h_flk);
@@ -531,11 +532,13 @@ int match_pos(struct depnode * header, uint32_t pos, cntstat_t state)
   while (tmp && pos > tmp->stop)
     {
     tmp = tmp->next;
-    if (tmp && isZero(tmp->len)) depnode_init(tmp);
     }
+
   if (isNull(tmp)) return 1; // this chromosome is finished, skip in next loop
+  //debug("pos: %u\tstart: %u\tstop: %u", pos, tmp->start, tmp->stop);
   if (pos >= tmp->start)
     {
+    if (isZero(tmp->len)) depnode_init(tmp);
     if (state == CMATCH)
       {
       tmp->vals[pos - tmp->start]++;
@@ -567,14 +570,23 @@ int readcore(struct depnode *header, bam1_t const * b, cntstat_t state)
   bam1_core_t const *c = &b->core;
   int pos = c->pos + 1;
 
-  while (tmp && pos > tmp->stop) tmp = tmp->next;
+  /* while (tmp && pos > tmp->stop) */
+  /*   { */
+  /*   tmp= tmp->next; */
+  /*   } */
+  /* header = tmp; */
   if (isNull(tmp)) return 0;
   uint32_t *cigar = bam1_cigar(b);
   uint32_t end = bam_calend(c, cigar);
+
   if (end >= tmp->start)
     {
     int j = 0, l, s;
-    if (pos >= tmp->start) tmp->cnts[pos - tmp->start]++;
+    if (pos >= tmp->start)
+      {
+      if (isZero(tmp->len)) depnode_init(tmp);
+      tmp->cnts[pos - tmp->start]++;
+      }
     for (i = 0; i < c->n_cigar; ++i)
       {
       s = cigar[i] & 0xf;
@@ -584,11 +596,7 @@ int readcore(struct depnode *header, bam1_t const * b, cntstat_t state)
       else continue;
       for (j = 0; j < l; ++j)
 	{
-	if (pos >= tmp->start && match_pos(tmp, pos, tmp_state))
-	  {
-	  pos += l - j -1;
-	  break;
-	  }
+	if (pos >= tmp->start) match_pos(tmp, pos, tmp_state);
 	pos++;
 	}
       }
@@ -906,11 +914,11 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
       if (para->flk_node && readcore(para->flk_node, b,state)) fs->n_flk++;
 
       while (para->tgt_node && para->tgt_node->stop < para->lstpos +1)
-	{
-	stat_each_region(para, a);
-	del_node(para->tgt_node);
-	if (para->tgt_node && isZero(para->tgt_node->len)) depnode_init(para->tgt_node);
-	}
+      	{
+      	stat_each_region(para, a);
+      	del_node(para->tgt_node);
+      	if (para->tgt_node && isZero(para->tgt_node->len)) depnode_init(para->tgt_node);
+      	}
       if (para->tgt_node && readcore(para->tgt_node, b,state))
 	{
 	if (export_target_bam) bam_write1(bamoutfp, b);	
@@ -1077,7 +1085,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   FILE *fc = open_wfile("coverage.report");       
   do
     {
-    fprintf(fc, "## The file was created by %s", program_name);
+    fprintf(fc, "## The file was created by %s\n", program_name);
     fprintf(fc, "## Version : %s\n", Version);
     fprintf(fc, "## Files : ");
     for (i = 0;  i < f->nfiles; ++i) fprintf(fc, "%s ", f->inputs[i]);
