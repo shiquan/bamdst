@@ -626,15 +626,7 @@ loopbams_parameters_t * init_loopbams_parameters()
   {
   loopbams_parameters_t * para;
   para = (loopbams_parameters_t*)needmem(sizeof(loopbams_parameters_t));
-  para->tid = -1;
-  para->lstpos = 0;
-  para->tar = NULL;
-  para->flk = NULL;
-  para->ucreg = NULL;
-  para->depvals_of_chr = NULL;
-  para->name = NULL;
-  para->tgt_node = NULL;
-  para->flk_node = NULL;
+  *para = (loopbams_parameters_t){.tid=-1};
   para->pdepths = (kstring_t*)needmem(sizeof(kstring_t));
   para->rcov = (kstring_t*)needmem(sizeof(kstring_t));
   para->pdepths->l = para->pdepths->m = 0;
