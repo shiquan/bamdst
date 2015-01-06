@@ -46,7 +46,8 @@ void errabort(char *format, ...)
   va_list args;
   va_start(args, format);
   fprintf(stderr, "@@ ERROR ABORT @@ ");
-  stderr_print(format, args);
+  vfprintf(stderr, format, args);
+  fprintf(stderr, "\n");
   va_end(args);
   exit(-1);
   }

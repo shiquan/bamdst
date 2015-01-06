@@ -52,6 +52,9 @@ extern bedHandle_t *bedHand;
 /* only accepted one stdin pipeline */
 static bool stdin_lock = FALSE;
 
+/* the bed file is zero based */
+static bool zero_based = FALSE;
+
 /* The number of threads after which there are 
    diminishing performance gains. */
 enum { DEFAULT_MAX_THREADS = 8 };
@@ -61,11 +64,22 @@ enum { DEFAULT_MAX_THREADS = 8 };
  */
 // static bool rmdup_mark = FALSE;
 
+/* export target reads to a specitified bam file */
+static char* export_target_bam = NULL;
+bamFile bamoutfp;
+
+int check_filename_isbam(char *name)
+  {
+  int length = strlen(name);
+  if (strcmp(name + length - 4, ".bam")) return 1;
+  return 0;
+  }
+
 static const int WINDOW_SIZE = 64 * 1024;
 // force replace the existed files
 //static bool is_forced = TRUE;
 
-static char *outdir = 0;
+static char *outdir = NULL;
 
 static int uncover_cutoff = 5;
 // init hash struct to store uncover regions
@@ -76,18 +90,6 @@ void h_uncov_init()
   h_uncov = kh_init(reg);
   }
 
-struct opt_aux
-  {
-  int nfiles;
-  //char *outdir;
-  char **inputs;
-  //	int flk_reg;
-  int isize_lim;
-  int cutoff;
-  int mapQ_lim;
-  int maxdepth;
-  };
-
 /* @FLANK_REGION coverage of flank region list in report.
    @INSERTSIZE_LIMIT the insert size bigger than this will not be calculated.
    @MAXDEPTH_LIMIT the depth bigger than this will not be calculated, 
@@ -95,22 +97,16 @@ struct opt_aux
    @CUTOFF  if you want know coverage of specity depth, set this value.
    @MAPQ_LIMIT  >=mapQ_limit list in report.
 */
-
-static struct opt_aux *
-opt_init()
+struct opt_aux
   {
-  struct opt_aux *aux;
-  aux = (struct opt_aux*)needmem(sizeof(struct opt_aux));
-  aux->nfiles = 0;
-  //aux->outdir = NULL;
-  aux->inputs = NULL;
-  //aux->flk_reg = 200;
-  aux->isize_lim = 2000;
-  aux->cutoff = 0; //
-  aux->maxdepth = 0;
-  aux->mapQ_lim = 20;
-  return aux;
-  }
+  int nfiles;
+  char **inputs;
+  int isize_lim;
+  int cutoff;
+  int mapQ_lim;
+  int maxdepth;
+  };
+
 
 struct depnode
   {
@@ -123,15 +119,6 @@ struct depnode
   unsigned *covdep; // coverage depth
   struct depnode *next;
   };
-
-void opt_destroy(struct opt_aux *opt)
-  {
-  //freemem(opt->outdir);
-  int i;
-  for (i = 0; i < opt->nfiles; ++i) freemem(opt->inputs[i]);
-  freemem(opt->inputs);
-  freemem(opt);
-  }
 
 // debug the depnode list init
 static const char * init_debugmsg[] =
@@ -161,14 +148,14 @@ depnode_init(struct depnode *node)
   if ( node->len ) return 1;
   node->len = node->stop - node->start + 1;
   if ( isZero(node->len)) return 2;
-  node->vals = (unsigned*)needmem((node->len+1) * sizeof(unsigned));
-  node->cnts = (unsigned*)needmem((node->len+1) * sizeof(unsigned));
-  node->rmdupdep = (unsigned*)needmem((node->len+1) * sizeof(unsigned));
-  node->covdep = (unsigned*)needmem((node->len+1) * sizeof(unsigned));
-  memset(node->vals, 0, sizeof *(node->vals));
-  memset(node->cnts, 0, sizeof *(node->cnts));
-  memset(node->rmdupdep, 0, sizeof *(node->rmdupdep));
-  memset(node->covdep, 0, sizeof *(node->covdep));
+  node->vals = (unsigned*)needmem((node->len) * sizeof(unsigned));
+  node->cnts = (unsigned*)needmem((node->len) * sizeof(unsigned));
+  node->rmdupdep = (unsigned*)needmem((node->len) * sizeof(unsigned));
+  node->covdep = (unsigned*)needmem((node->len) * sizeof(unsigned));
+  memset(node->vals, 0, node->len * sizeof(unsigned));
+  memset(node->cnts, 0, node->len * sizeof(unsigned));
+  memset(node->rmdupdep, 0, node->len * sizeof(unsigned));
+  memset(node->covdep, 0, node->len * sizeof(unsigned));
   return 0;
   }
 
@@ -202,12 +189,7 @@ bed_depnode_list(bedreglist_t *bed)
 
     /* the length of this region should be zero if not allocated memory yet
     *  Assign the length value when init the vals and cnts */
-    node->len = 0;     
-    node->vals = NULL;
-    node->cnts = NULL;
-    node->rmdupdep = NULL;
-    node->covdep = NULL;
-    
+    node->len = 0;
     if ( isZero(i)) header = node;
     else tmpnode->next = node;
     tmpnode = node;
@@ -285,7 +267,7 @@ void aux_destroy(struct _aux *a)
   free(a);
   }
 
-typedef struct
+typedef struct bamflag
   {
   uint64_t n_reads, n_mapped, n_pair_map, n_pair_all, n_pair_good;
   uint64_t n_sgltn, n_read1, n_read2;
@@ -298,17 +280,6 @@ typedef struct
    * ref:  https://www.biostars.org/p/59281/ */
   uint64_t n_tgt, n_flk, n_tdata, n_fdata;
   } bamflag_t;
-
-bamflag_t *bamflag_init()
-  {
-  bamflag_t *fs = (bamflag_t*)needmem(sizeof(bamflag_t));
-  fs->n_reads = fs->n_mapped = fs->n_pair_all = fs->n_pair_good = 0;
-  fs->n_sgltn = fs->n_read1 = fs->n_read2 = fs->n_pair_map = 0;
-  fs->n_dup = fs->n_diffchr = fs->n_pstrand = fs->n_mstrand = 0;
-  fs->n_qcfail = fs->n_data = fs->n_mdata = fs->n_qual = 0;
-  fs->n_tgt = fs->n_flk = fs->n_tdata = fs->n_fdata = 0;
-  return fs;
-  }
 
 // use this macro to stat the flags 
 #define flagstat(s, c, ret) do {					\
@@ -376,12 +347,14 @@ Option -o and -p are mandatory:\n\
                        be merged before calculate depths\n\
 ");
     puts ("\
-Ordering options:\n\
+Optional parameters:\n\
    -f, --flank [200]   flank n bp of each region\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
    --cutoffdepth [0]   list the coverage of above depths\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
+   --bamout  BAMFILE   target reads will be exported to this bam file\n\
+   -0                  start of the bed file is 0-based\n\
    -h, --help          print this help info\n\
 \n");
     /*-d, --rmdup         remove dup reads when calculate depth\n	\*/
@@ -423,13 +396,12 @@ KSORT_INIT_GENERIC(uint32_t)
 static float median_cal(const uint32_t * array, int l)
   {
   if (isNull(l)) return 0;
-  float med = 0.0;
   uint32_t *tmp;
   tmp = (uint32_t*)needmem(l *sizeof(uint32_t));
   memcpy(tmp, array, l * sizeof(uint32_t));
   ks_introsort(uint32_t, l, tmp);
-  med = l & 1 ? tmp[(l >> 1) + 1] :
-    (float)(tmp[l >> 1] + tmp[(l >> 1) - 1]) / 2;
+  float med = l & 1 ? tmp[(l >> 1) + 1] :
+    (tmp[l >> 1] + tmp[(l >> 1) - 1]) / 2.0;
   mustfree(tmp);
   return med;
   }
@@ -511,7 +483,8 @@ static char const * const report_tar[] =
 // FIXME: need broken when bed file is truncated
 int load_bed_init(char const *fn, aux_t * a)
   {
-  bedHand->read(fn, a->h_tgt, 0, 0);
+  if (zero_based) bedHand->read(fn, a->h_tgt, -1, 0);
+  else bedHand->read(fn, a->h_tgt, 0, 0);
   bedHand->merge(a->h_tgt);
   inf_t *inf1 = bedHand->stat(a->h_tgt);
   a->tgt_len = inf1->length;
@@ -555,13 +528,12 @@ typedef enum
 int match_pos(struct depnode * header, uint32_t pos, cntstat_t state)
   {
   struct depnode *tmp = header;
-  while (tmp && pos > tmp->start+ tmp->len)
+  while (tmp && pos > tmp->stop)
     {
     tmp = tmp->next;
     if (tmp && isZero(tmp->len)) depnode_init(tmp);
     }
   if (isNull(tmp)) return 1; // this chromosome is finished, skip in next loop
-  //if (pos > tmp->start + tmp->len - 1) return 1;
   if (pos >= tmp->start)
     {
     if (state == CMATCH)
@@ -579,56 +551,46 @@ int match_pos(struct depnode * header, uint32_t pos, cntstat_t state)
       tmp->vals[pos - tmp->start]++;
       tmp->covdep[pos - tmp->start]++;
       }
+    return 0;
     }
-  return 0;
+  return 1; // not reachable
   }
 
 /* when deal with a read struct, check the begin of this read and the last position 
  * of this read, if this read is overlap with target region, sum up the depth of
  * each related position */
-int readcore(struct depnode * header, bam1_t const * b, cntstat_t state)
+int readcore(struct depnode *header, bam1_t const * b, cntstat_t state)
   {
   struct depnode *tmp = header;
+  cntstat_t tmp_state = state;
   int i;
-  bam1_core_t *c = &b->core;
-  //if (c->pos < tmp->start) return 0;
-  while (tmp && c->pos > tmp->stop)
-    {
-    tmp = tmp->next;
-    }
+  bam1_core_t const *c = &b->core;
+  int pos = c->pos + 1;
+
+  while (tmp && pos > tmp->stop) tmp = tmp->next;
   if (isNull(tmp)) return 0;
   uint32_t *cigar = bam1_cigar(b);
   uint32_t end = bam_calend(c, cigar);
-  if (end >= tmp->start - 1)
+  if (end >= tmp->start)
     {
-    int j = 0, pos, l, s;
-    pos = c->pos + 1;
-    if (pos > tmp->start)
-      tmp->cnts[pos - tmp->start]++;
+    int j = 0, l, s;
+    if (pos >= tmp->start) tmp->cnts[pos - tmp->start]++;
     for (i = 0; i < c->n_cigar; ++i)
       {
       s = cigar[i] & 0xf;
       l = cigar[i] >> BAM_CIGAR_SHIFT;
-      if (s == BAM_CMATCH)
-	for (j = 0; j < l; ++j)
+      if (s == BAM_CDEL) tmp_state = CDEL;
+      else if (s == BAM_CMATCH) tmp_state = state;
+      else continue;
+      for (j = 0; j < l; ++j)
+	{
+	if (pos >= tmp->start && match_pos(tmp, pos, tmp_state))
 	  {
-	  if (match_pos(tmp, pos, state))
-	    {
-	    pos += l - j;
-	    break;
-	    }
-	  pos++;
+	  pos += l - j -1;
+	  break;
 	  }
-      else if (s == BAM_CDEL)
-	for (j = 0; j < l; ++j)
-	  {
-	  if (match_pos(tmp, pos, CDEL))
-	    {
-	    pos += l - j;
-	    break;
-	    }
-	  pos++;
-	  }
+	pos++;
+	}
       }
     return 1;
     }
@@ -831,8 +793,6 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   ksprintf(para->pdepths, "#Chr\tPos\tRaw Depth\tRmdup depth\tCover depth\n");
   ksprintf(para->rcov, "#Chr\tStart\tStop\tAvg depth\tMedian\tCoverage\tCoverage(FIX)\n");
   if (outdir) chdir(outdir); // FIXME: if there is no such dir?
-  
-  //h_uncov = kh_init(reg);
   h_uncov_init();
   int i;
   for (i = 0; i < a->ndata; ++i)
@@ -858,8 +818,6 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
       bam1_core_t *c = &b->core;
       flagstat(fs, c, ret);
       if (c->qual > f->mapQ_lim) fs->n_qual++;
-      //if (rmdup_mark && ret > 1) goto endcore;
-      // rmdup is removed since version 1.0.0
       if (ret > 1) state = CDUP;
       if (c->tid == -1) goto endcore; // unmapped~
 
@@ -875,30 +833,25 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	if (para->lstpos > c->pos) // Only accepted sorted bam files for effective
 	  errabort("The bam file is not sorted!");
 	}
-      para->lstpos = c->pos;
+      para->lstpos = c->pos; // 0-base
 
       // if tid != c->tid, completed the stat of the last chromosome
       // init the new chromosome node and clean the memory
       // FIXME: need multi thread to improve it or NOT?
       if (para->tid != c->tid) 
 	{
-
 	goto_next_chromosome = FALSE; // clean the flag of skiping
 
 	// still have reachable target node
 	// release the left nodes
 	if (para->tgt_node && para->tid >= 0)
-	  {
-	  stat_each_region(para, a);
-	  del_node(para->tgt_node);
-	  depnode_init(para->tgt_node);
 	  while (para->tgt_node)
 	    {
 	    stat_each_region(para, a);
 	    del_node(para->tgt_node);
 	    // no need allocate memory space for these node, becase they are all 0s
 	    }
-	  }
+
 	if (para->flk_node && para->tid >= 0)
 	  {
 	  stat_flk_depcnt(para, a);
@@ -908,9 +861,6 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	    del_node(para->flk_node);
 	    }
 	  }
-
-	//if (para->tid >= 0) // add the depth counts of each chromosome to target counts
-	//count_merge(a->c_dep, para->depvals_of_chr, uint32_t);
 
 	para->tid = c->tid;
 	para->name = h->target_name[c->tid];
@@ -943,25 +893,30 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 
 	/* the next part is init uncover region hash*/
 	k = kh_put(reg, h_uncov, strdup(para->name), &ret);
-	//fprintf(stderr,"k: %d\n", k);
+
 	bedreglist_t *ucreg_tmp;
 	ucreg_tmp = (bedreglist_t*)needmem(sizeof(bedreglist_t));
 	kh_val(h_uncov, k) = *ucreg_tmp;
 	para->ucreg = &kh_val(h_uncov, k); // FIXME: I don't understand why couldn't use ucreg_tmp directly
 	/* finish init */
-	
 	}
       while (para->flk_node && para->flk_node->stop < para->lstpos+1)
 	stat_flk_depcnt(para, a);
 
       if (para->flk_node && readcore(para->flk_node, b,state)) fs->n_flk++;
+
       while (para->tgt_node && para->tgt_node->stop < para->lstpos +1)
 	{
 	stat_each_region(para, a);
 	del_node(para->tgt_node);
 	if (para->tgt_node && isZero(para->tgt_node->len)) depnode_init(para->tgt_node);
 	}
-      if (para->tgt_node && readcore(para->tgt_node, b,state)) fs->n_tgt++;
+      if (para->tgt_node && readcore(para->tgt_node, b,state))
+	{
+	if (export_target_bam) bam_write1(bamoutfp, b);	
+	fs->n_tgt++;
+	}
+
       endcore:
       bam_destroy1(b);
       }
@@ -995,8 +950,7 @@ uint64_t cntcov_cal(struct opt_aux *f,
   uint64_t rawcnt = 0;
   int i;
   *data = 0;
-  cov->cnt = cov->cnt4 = cov->cnt10 = cov->cnt30 = cov->cnt100 = cov->cntx = 0;
-  cov->cov = cov->cov4 = cov->cov10 = cov->cov30 = cov->cov100 = cov->covx = 0;
+  *cov = (struct regcov){};
   for (i = 0; i < cnt->m; ++i)
     {
     (*data) += cnt->a[i] * i;
@@ -1061,7 +1015,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   for (i = 0; i < a->c_isize->m; ++i)
     {
     icumu -= a->c_isize->a[i];
-    fprintf(finsert, "%d\t%u\t%f\t%lu\t%f\n",
+    fprintf(finsert, "%d\t%u\t%f\t%"PRIu64"\t%f\n",
 	    i, a->c_isize->a[i], (float)a->c_isize->a[i] / icnt, icumu, (float)icumu/ icnt );
     }
 
@@ -1070,7 +1024,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   for (i = 0; i < a->c_dep->m; ++i)
     {
     dcumu -= a->c_dep->a[i];
-    fprintf(fdep, "%d\t%u\t%f\t%lu\t%f\n",
+    fprintf(fdep, "%d\t%u\t%f\t%"PRIu64"\t%f\n",
 	    i, a->c_dep->a[i], (float)a->c_dep->a[i] / dcnt, dcumu, (float)dcumu/dcnt);
     }
   fclose(fdep);
@@ -1128,38 +1082,38 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     fprintf(fc, "## Files : ");
     for (i = 0;  i < f->nfiles; ++i) fprintf(fc, "%s ", f->inputs[i]);
     fprintf(fc, "\n");
-    fprintf(fc, "%60s\t%lu\n", report_total[0], fs->n_reads);
-    fprintf(fc, "%60s\t%lu\n", report_total[1], fs->n_qcfail);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[0], fs->n_reads);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[1], fs->n_qcfail);
     fprintf(fc, "%60s\t%.2f\n", report_total[2], (float)fs->n_data / 1e6);
-    fprintf(fc, "%60s\t%lu\n", report_total[3], fs->n_pair_all);
-    fprintf(fc, "%60s\t%lu\n", report_total[4], fs->n_mapped);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[3], fs->n_pair_all);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[4], fs->n_mapped);
     fprintf(fc, "%60s\t%.2f%%\n", report_total[5], (float)fs->n_mapped / fs->n_reads *100);
     fprintf(fc, "%60s\t%.2f\n", report_total[6], fs->n_mdata / 1e6);
     fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_mdata / fs->n_data *100);
-    fprintf(fc, "%60s\t%lu\n", report_total[8], fs->n_pair_good);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[8], fs->n_pair_good);
     fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_pair_good / fs->n_reads *100);
-    fprintf(fc, "%60s\t%lu\n", report_total[9], fs->n_pair_map);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[9], fs->n_pair_map);
     fprintf(fc, "%60s\t%.2f%%\n", report_total[10], (float)fs->n_pair_map / fs->n_reads *100);
-    fprintf(fc, "%60s\t%lu\n", report_total[11], fs->n_sgltn);
-    fprintf(fc, "%60s\t%lu\n", report_total[13], fs->n_diffchr);
-    fprintf(fc, "%60s\t%lu\n", report_total[14], fs->n_read1);
-    fprintf(fc, "%60s\t%lu\n", report_total[15], fs->n_read2);
-    fprintf(fc, "%60s\t%lu\n", report_total[16], fs->n_pstrand);
-    fprintf(fc, "%60s\t%lu\n", report_total[17], fs->n_mstrand);
-    fprintf(fc, "%60s\t%lu\n", report_total[18], fs->n_dup);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[11], fs->n_sgltn);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[13], fs->n_diffchr);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[14], fs->n_read1);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[15], fs->n_read2);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[16], fs->n_pstrand);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[17], fs->n_mstrand);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[18], fs->n_dup);
     fprintf(fc, "%60s\t%.2f%%\n", report_total[19], (float)fs->n_dup / fs->n_reads *100);
     fprintf(fc, "%60s\t%d\n", report_total[20], f->mapQ_lim);
-    fprintf(fc, "%60s\t%lu\n", report_total[21], fs->n_qual);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[21], fs->n_qual);
     fprintf(fc, "%60s\t%.2f%%\n", report_total[22], (float)fs->n_qual / fs->n_reads * 100);
     fprintf(fc, "%60s\t%.2f%%\n", report_total[23], (float)fs->n_qual / fs->n_mapped *100);
     //tgt
-    fprintf(fc, "%60s\t%lu\n", report_tar[0], fs->n_tgt);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[0], fs->n_tgt);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[1], (float)fs->n_tgt / fs->n_reads *100);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[2], (float)fs->n_tgt / fs->n_mapped*100);
     fprintf(fc, "%60s\t%.2f\n", report_tar[3], (float)fs->n_tdata / 1e6);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[4], (float)fs->n_tdata / fs->n_data *100);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[5], (float)fs->n_tdata / fs->n_mdata*100);
-    fprintf(fc, "%60s\t%lu\n", report_tar[6], a->tgt_len);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[6], a->tgt_len);
     fprintf(fc, "%60s\t%.2f\n", report_tar[7], (float)fs->n_tdata / a->tgt_len);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[8], tarcov->cov);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[9], tarcov->cov4);
@@ -1168,7 +1122,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[12], tarcov->cov100);
     //tgt regions
     fprintf(fc, "%60s\t%u\n", report_tar[13], a->tgt_nreg);
-    fprintf(fc, "%60s\t%lu\n", report_tar[14], regcov->cnt);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[14], regcov->cnt);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[15], regcov->cov);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[16], regcov->cov4);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[17], regcov->cov10);
@@ -1176,9 +1130,9 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[19], regcov->cov100);
     //flk
     fprintf(fc, "%60s\t%u\n", report_tar[20], flank_reg);
-    fprintf(fc, "%60s\t%lu\n", report_tar[21], a->flk_len);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[21], a->flk_len);
     fprintf(fc, "%60s\t%.2f\n", report_tar[22], (float)fs->n_fdata / a->flk_len);
-    fprintf(fc, "%60s\t%lu\n", report_tar[23], fs->n_flk);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[23], fs->n_flk);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[24], (float)fs->n_flk / fs->n_reads *100);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[25], (float)fs->n_flk / fs->n_mapped*100);
     fprintf(fc, "%60s\t%.2f\n", report_tar[26], (float)fs->n_fdata / 1e6);
@@ -1205,6 +1159,7 @@ enum
   CUTOFF,
   INSERTSIZE,
   UNCOVER,
+  BAMOUT,
   HELP
   };
 
@@ -1218,6 +1173,7 @@ static struct option const long_opts[] =
   {"isize", required_argument, NULL, INSERTSIZE},
   {"mapthres", required_argument, NULL, 'q'},
   {"uncover", required_argument, NULL, UNCOVER},
+  {"bamout", required_argument, NULL, BAMOUT},
   //{"rmdup", no_argument, NULL, 'd'},
   {"help", no_argument, NULL, 'h'}
   };
@@ -1226,9 +1182,9 @@ int bamdst(int argc, char *argv[])
   {
   int n, i;
   char *probe = 0;
-  //bool help = FALSE;
-  struct opt_aux *opt = opt_init();
-  while ((n = getopt_long(argc, argv, "o:p:f:q:l:h", long_opts, NULL)) >= 0)
+  
+  struct opt_aux opt = {.inputs=NULL, .isize_lim = 2000, .mapQ_lim = 20};
+  while ((n = getopt_long(argc, argv, "o:p:f:q:l:h0", long_opts, NULL)) >= 0)
     {
     switch (n)
       {
@@ -1239,21 +1195,28 @@ int bamdst(int argc, char *argv[])
 	//flk the region for more information, default is 200 bp
       case 'f': flank_reg = atoi(optarg); break;
 	//max depth to considered in the cumulative distribution of depths
-      case MAXDEPTH: opt->maxdepth = atoi(optarg); break;
-      case CUTOFF: opt->cutoff = atoi(optarg); break;
+      case MAXDEPTH: opt.maxdepth = atoi(optarg); break;
+      case CUTOFF: opt.cutoff = atoi(optarg); break;
 	// uncover_cutoff must be greater than 0
       case UNCOVER: uncover_cutoff = atoi(optarg); assert(uncover_cutoff > 0); break;
-      case INSERTSIZE: opt->isize_lim = atoi(optarg); break;
-      case 'q': opt->mapQ_lim = atoi(optarg); break;
+      case INSERTSIZE: opt.isize_lim = atoi(optarg); break;
+      case BAMOUT: export_target_bam = strdup(optarg); break;
+      case 'q': opt.mapQ_lim = atoi(optarg); break;
       case 'h': usage(1); break;
+      case '0': zero_based = TRUE; break;
 	//case 'd': rmdup_mark = TRUE; break;
       default: usage(0); 
 	//more help
       }
 		
     }
-  if (isNull(outdir) || isNull(probe))
-    usage(0);
+  if (isNull(outdir) || isNull(probe)) usage(0);
+  if (export_target_bam && check_filename_isbam(export_target_bam))
+    {
+    fprintf(stderr,"--bamout must be a bam file: %s", export_target_bam);
+    goto freeall;
+    }
+  
   n = argc - optind;
   //capable of deals with severl bam files
   aux_t * aux;
@@ -1264,13 +1227,13 @@ int bamdst(int argc, char *argv[])
     aux->data[0] = bgzf_dopen(fileno(stdin), "r");
     aux->h = bam_header_read(aux->data[0]);
     aux->ndata = 1;
-    opt->nfiles = 0;
+    opt.nfiles = 0;
     }
   else
     {
     aux->data = (bamFile*)needmem(n * sizeof(bamFile));
-    opt->nfiles = n;
-    opt->inputs = (char**)needmem(n * sizeof(char*));
+    opt.nfiles = n;
+    opt.inputs = (char**)needmem(n * sizeof(char*));
     for (i = 0; i < n; ++i)
       {
       bam_header_t *h_tmp;
@@ -1285,34 +1248,42 @@ int bamdst(int argc, char *argv[])
 	aux->data[i] = bgzf_open(argv[optind + i], "r");
 	}
       if (aux->data[i] == NULL)
-	errabort("%s: %s\n", argv[optind + i], strerror(errno));
+	errabort("%s: %s", argv[optind + i], strerror(errno));
       h_tmp = bam_header_read(aux->data[i]);
       if (i == 0) aux->h = h_tmp;
       else bam_header_destroy(h_tmp);
-      opt->inputs[i] = strdup(argv[optind+i]);
+      opt.inputs[i] = strdup(argv[optind+i]);
       }
     aux->ndata = n;
     }
+  if (export_target_bam)
+    {
+    bamoutfp = bam_open(export_target_bam, "w");
+    if (bamoutfp == NULL)
+      errabort("%s : %s", export_target_bam, strerror(errno));
+    bam_header_write(bamoutfp, aux->h);
+    }
   load_bed_init(probe, aux);
   freemem(probe);
-  aux->c_isize->a = calloc(opt->isize_lim, sizeof(unsigned));
-  for (i = 0; i < opt->isize_lim; ++i) aux->c_isize->a[i] = 0;
-  aux->c_isize->n = opt->isize_lim;
+  aux->c_isize->a = calloc(opt.isize_lim, sizeof(unsigned));
+  for (i = 0; i < opt.isize_lim; ++i) aux->c_isize->a[i] = 0;
+  aux->c_isize->n = opt.isize_lim;
   aux->nchr = aux->h->n_targets;
-  bamflag_t *fs = bamflag_init();
-  load_bamfiles(opt, aux, fs);
-  print_report(opt, aux, fs);
-  mustfree(fs);
+  struct bamflag fs = {};
+  load_bamfiles(&opt, aux, &fs);
+  print_report(&opt, aux, &fs);
   aux_destroy(aux);
-  opt_destroy(opt);
-  
+  for (i = 0; i < opt.nfiles; ++i) freemem(opt.inputs[i]);
+  freemem(opt.inputs);
+  if (export_target_bam) bam_close(bamoutfp);
+  freeall:
+  freemem(export_target_bam);
+  freemem(outdir);
   return 1;
   }
 
 /* main */
 int main(int argc, char *argv[])
   {
-  bamdst(argc, argv);
-  freemem(outdir);
-  return 1;
+  return bamdst(argc, argv);
   }

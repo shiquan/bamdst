@@ -33,6 +33,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
+#include <inttypes.h>
 #include <ctype.h>
 #include <sys/types.h>
 #include <assert.h>
