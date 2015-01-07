@@ -771,7 +771,7 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
   for (j = 0; j < node->len; ++j)
     count_increase(a->c_flkdep, node->vals[j], uint32_t);
   del_node(para->flk_node);
-  depnode_init(para->flk_node);
+  if(para->flk_node && para->flk_node->len == 0) depnode_init(para->flk_node);
   return 1;
   }
 
