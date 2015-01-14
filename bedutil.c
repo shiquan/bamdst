@@ -245,27 +245,56 @@ static bedreglist_t * regcore_uniq(bedreglist_t * bed1, bedreglist_t * bed2)
     {
     int beg, end;
     beg = bed->a[i]>>32; end = (uint32_t)bed->a[i];
-    if (lastend < beg || lastend < 1)
+
+    /* condition 1:  init beg and end
+     *
+     *         lastbeg        lastend
+     *         |              |
+     *         ===============
+     *                            ---------------------
+     *                           |                    |
+     *                           beg                  end
+     *
+     */
+    if (lastend <= beg || lastend < 1)
       {
       lastbeg = beg; lastend = end;
       continue;
       }
-    if (lastend == beg)
-      {
-      b[j++] = (uint64_t) beg <<32 | beg;
-      lastbeg = beg + 1;
-      lastend = end > beg ? end : 0;
-      continue;
-      }
+    
+    /* condition 2:  init beg and end
+     *
+     *         lastbeg                   lastend
+     *         |                              |
+     *         ================================
+     *              ---------------------
+     *             |                    |
+     *             beg                  end
+     *
+     */
+    
     if (lastend > end)
       {
       b[j++] = (uint64_t) beg <<32 | (uint32_t)end;
-      lastbeg = end + 1;
+      lastbeg = end;
       continue;
       }
-    b[j++] = (uint64_t) beg <<32 | (uint32_t)lastend;
-    lastbeg = lastend + 1;
-    lastend = lastend == end ? 0 : end;
+    else
+      {
+      /* condition 3:  init beg and end
+       *
+       *         lastbeg        lastend
+       *         |              |
+       *         ===============
+       *                 ---------------------
+       *                |                    |
+       *                beg                  end
+       *
+       */
+      b[j++] = (uint64_t) beg <<32 | (uint32_t)lastend;
+      lastbeg = lastend;
+      lastend = lastend == end ? 0 : end;
+      }
     }
   bed->n = bed->m+1;
   bed->m = j;
