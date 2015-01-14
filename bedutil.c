@@ -43,7 +43,7 @@ static inf_t *inf_stat(regHash_t *rghsh)
 	uint32_t beg = bed->a[i] >> 32;
 	uint32_t end = (uint32_t)bed->a[i];
 	assert(end >= beg);
-	inf->length += end - beg + 1;
+	inf->length += end - beg; // 0based
 	}
 
       inf->total += bed->m;
@@ -53,8 +53,10 @@ static inf_t *inf_stat(regHash_t *rghsh)
   }
 
 static void
-bed_read(const char *fn, regHash_t * reghash, int add1, int add2) 
+bed_read(const char *fn, regHash_t * reghash, int add1, int add2, int *ret) 
   {
+  if (add1 < 0) errabort("the left flank size must be greater than 0! maybe you want try `trim` instead of `merge`...");
+  if (add2 < 0) errabort("the right flank size must be greater than 0! maybe you want try `trim` instead of `merge`...");
   gzFile fp = safe_gzopen(fn);
   kstream_t * ks;
   int dret;
@@ -93,22 +95,35 @@ bed_read(const char *fn, regHash_t * reghash, int add1, int add2)
 	  {
 	  if (ks_getuntil(ks, 0, str, &dret) > 0 && isdigit(str->s[0]))
 	    {
-	    end = atoi(str->s);
-	    if (end < beg) swapvalue(beg, end, uint32_t);
+	    end = atoi(str->s);	  
 	    while (dret != '\n' && ks_getuntil(ks, 0, str, &dret) > 0); // skip all other parts
 	    }
 	  }
 	}
       }
-    if (beg>>31) beg = 0;
-    if (end <= 0) end = beg; // this is different from bed_read in bedidx.c
+    if (beg < 0) beg = 0;
+    if (end <= 0)
+      {
+      // this is different from bed_read in bedidx.c
+      end = beg;
+      beg = beg < 1 ? 0 : beg-1;
+      }
+    
     if (end == 0)
       {
       warnings("%s: line %d is malformed! skip... ", fn, line);
       continue;
       }
+    if (end < beg) swapvalue(beg, end, uint32_t);
     if (add1) beg -= add1;
-    if (add2) end += add2;
+    if (add2) end += add2; // end should be check the edge of the chromose
+    if (beg <= 0) beg = 1;
+    if (beg == end)
+      {
+      //errabort("This region has the same start and end, not a bed format : %d\t%d\n"
+      //	       "Please use parameter \"-1\" if your bed file is 1-based!", beg, end);
+      *ret = 1;
+      }
     if (p->m == p->n)
       {
       p->n = p->n ? p->n <<1 : 4;
@@ -189,7 +204,7 @@ static void regcore_merge(bedreglist_t *bed)
       lastbeg = beg;
       continue;
       }
-    if (lastend + 1>= beg)
+    if (lastend + 1> beg)
       {
       if (lastend < end) lastend = end;
       }
@@ -273,13 +288,31 @@ static bedreglist_t * regcore_diff(bedreglist_t * bed1, bedreglist_t * bed2)
     {
     uint32_t beg, end;
     beg = reg->a[i]>>32; end = (uint32_t)reg->a[i];
+
+    /* condition 1:  init beg and end
+     *
+     *         beg             end
+     *         |              |
+     *         ===============
+     *
+     */
     if (lastend < 1)
       {
       lastbeg = beg; lastend = end;
       continue;
       }
 
-    if (lastend < beg)
+    /* condition 2: 
+     *
+     *         lastbeg     lastend
+     *         |          |
+     *  region -----------
+     *                 (no overlap)
+     *                           ===============  new region
+     *                          |              |
+     *                          beg            end
+     */
+    if (lastend <= beg)
       {
       b[j++] = (uint64_t) lastbeg << 32| lastend;
       lastbeg = beg; lastend = end;
@@ -287,56 +320,120 @@ static bedreglist_t * regcore_diff(bedreglist_t * bed1, bedreglist_t * bed2)
       }
     if (lastbeg == beg)
       {
+      
+      /* condition 3: 
+       *
+       *         lastbeg     lastend
+       *         |               |
+       *  region ----------------
+       *         |||||||||||||||| (equal)
+       *         ===============  new region
+       *        |              |
+       *        beg            end
+       */
       if (end == lastend)
 	{
 	lastbeg = lastend = 0;
 	continue;
 	}
+
+      /* condition 4: 
+       *
+       *         lastbeg     lastend
+       *         |          |
+       *  region -----------
+       *         | overlap |~~~~~~~
+       *         ==================  new region
+       *        |                 |
+       *        beg            end
+       */
+      
       if (lastend < end)
 	{
-	lastbeg = lastend + 1;
+	//lastbeg = lastend + 1;
+	lastbeg = lastend;
 	lastend =  end;
 	}
       else
 	{
-	lastbeg = end+ 1;
+	// this condition will be not happened unless bed file is not sorted!
+	/* condition 5: 
+	 *
+	 *         lastbeg                    lastend
+	 *         |                          |
+	 *  region ---------------------------
+	 *         | overlap |||||||||
+	 *         ==================  new region
+	 *         |                |
+	 *         beg            end
+	 */
+	errabort("condition5 error: please cantact the developer when you see this message!");
+	lastbeg = end;
 	}
 
-      assert(lastbeg <= lastend);
+      assert(lastbeg < lastend);
       continue;
       }
-    if (lastend == beg)
-      {
-      if (lastbeg < lastend)
-	{
-	b[j++] = (uint64_t) lastbeg << 32| (lastend-1);
-	}
-      lastbeg = beg + 1;
-      lastend = lastend == end ? 0 : end;
-      continue;
-      }
+    
+    // lastend > beg come here
     if (lastbeg < beg)
       {
-      b[j++] = (uint64_t) lastbeg << 32| (beg -1);
+      //b[j++] = (uint64_t) lastbeg << 32| (beg -1);
+      b[j++] = (uint64_t) lastbeg << 32| beg ; // 0based beg
       }
     else
       {
       errabort("FIXME: not properly sorted!"
 	       "Contact developer if you see this message!");
       }
+    
+    /* condition 6: 
+     *
+     *         lastbeg              lastend
+     *         |                   |
+     *  region --------------------
+     *         ***********||||||||~~~~~~~~~~
+     *                    ==================  new region
+     *                   |                |
+     *                   beg            end
+     */
     if (lastend < end)
       {
-      lastbeg = lastend + 1;
+      //lastbeg = lastend + 1;
+      lastbeg = lastend;
       lastend = end;
       continue;
       }
-    if (lastend == end)
+
+    /* condition 7: 
+     *
+     *         lastbeg                 lastend
+     *         |                            |
+     *  region -----------------------------
+     *         ***********||||||||||||||||||
+     *                    ==================  new region
+     *                   |                |
+     *                   beg            end
+     */
+    else if (lastend == end)
       {
       lastbeg = lastend = 0;
       continue;
       }
-    lastbeg = end +1;
-
+    else
+      {
+      /* condition 8: 
+       *
+       *         lastbeg                                lastend
+       *         |                                            |
+       *  region ---------------------------------------------
+       *         ***********||||||||||||||||||~~~~~~~~~~~~~~~~
+       *                    ==================  new region
+       *                   |                |
+       *                   beg            end
+       */
+      lastbeg = end;
+      }
     }
   reg->m = j;
   freemem(reg->a);
@@ -361,7 +458,7 @@ static bedreglist_t * regcore_trim(bedreglist_t *bed1, int trim1, int trim2)
 	 
     if (end -beg <= trim1 + trim2)
       {
-      warnings("[%u\t%u] The region is too short to trim! Skip...", beg, end);
+      warnings("[%u\t%u] The region is too short to trim! Skip... use base0to1 to trans 0-based file to 1-based file!", beg, end);
       }
     else
       {
@@ -441,6 +538,50 @@ static void bed_trim(regHash_t *rghsh, int trim1, int trim2)
     }
   }
 
+static void bed_view(regHash_t *reghash, char *reg)
+  {
+  bed_merge(reghash);
+  
+  }
+
+static void bed_1to0(regHash_t *reghash)
+  {
+  khiter_t k;
+  int i;
+  for (k = 0; k < kh_end(reghash); ++k)
+    {
+    if (kh_exist(reghash, k))
+      {
+      for (i = 0; i < kh_val(reghash, k).m; ++i)
+	{
+	uint32_t beg = (kh_val(reghash, k).a[i] >>32) -1;
+	uint32_t end = (uint32_t)kh_val(reghash, k).a[i];
+	if (isZero(beg)) errabort("the beg is 0: %u\t%u", beg, end);
+	kh_val(reghash, k).a[i] = (uint64_t)beg <<32|end;
+	}
+      }
+    }
+  }
+
+static void bed_0to1(regHash_t *reghash)
+  {
+  khiter_t k;
+  int i;
+  for (k = 0; k < kh_end(reghash); ++k)
+    {
+    if (kh_exist(reghash, k))
+      {
+      for (i = 0; i < kh_val(reghash, k).m; ++i)
+	{
+	uint32_t beg = (kh_val(reghash, k).a[i] >>32) +1;
+	uint32_t end = (uint32_t)kh_val(reghash, k).a[i];
+	if (beg > end) errabort("the beg is greater than end: %u\t%u ! it's not a 0 based file.", beg, end);
+	kh_val(reghash, k).a[i] = (uint64_t)beg <<32|end;
+	}
+      }
+    }
+  }
+
 static void bed_save(const char *fn, regHash_t *reghash) 
   {
   FILE *fp;
@@ -462,6 +603,25 @@ static void bed_save(const char *fn, regHash_t *reghash)
   fclose(fp);
   }
 
+static void bed_pipeout(regHash_t *reghash)
+  {
+  khiter_t k;
+  int i;
+  for (k = 0; k < kh_end(reghash); ++k)
+    {
+    if (kh_exist(reghash, k))
+      {
+      for (i = 0; i < kh_val(reghash, k).m; ++i)
+	{
+	uint32_t beg = kh_val(reghash, k).a[i] >>32;
+	uint32_t end = (uint32_t)kh_val(reghash, k).a[i];
+	printf("%s\t%u\t%u\n", kh_key(reghash, k), beg, end);
+	}
+      }
+    }
+  fflush(stdout);
+  }
+
 static bedHandle_t defaultBedHandler =
   {
   inf_init,
@@ -479,6 +639,9 @@ static bedHandle_t defaultBedHandler =
   bed_save,
   bed_destroy,
   inf_stat,
+  bed_1to0,
+  bed_0to1,
+  bed_pipeout,
   };
 
 bedHandle_t const *bedHand = &defaultBedHandler;

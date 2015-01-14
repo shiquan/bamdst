@@ -53,7 +53,7 @@ extern bedHandle_t *bedHand;
 static bool stdin_lock = FALSE;
 
 /* the bed file is zero based */
-static bool zero_based = FALSE;
+static bool zero_based = TRUE;
 
 /* The number of threads after which there are 
    diminishing performance gains. */
@@ -184,7 +184,7 @@ bed_depnode_list(bedreglist_t *bed)
   for ( i = 0; i < bed->m; ++i)
     {
     node = (struct depnode*)needmem(sizeof(struct depnode));
-    node->start = (uint32_t)(bed->a[i] >> 32);
+    node->start = (uint32_t)(bed->a[i] >> 32) + 1; // 0-based to 1-based
     node->stop = (uint32_t)bed->a[i];
 
     /* the length of this region should be zero if not allocated memory yet
@@ -194,6 +194,7 @@ bed_depnode_list(bedreglist_t *bed)
     else tmpnode->next = node;
     tmpnode = node;
     }
+
   INIT_DEBUG(depnode_init(header));
   return header;
   }
@@ -354,7 +355,7 @@ Optional parameters:\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
    --bamout  BAMFILE   target reads will be exported to this bam file\n\
-   -0                  start of the bed file is 0-based\n\
+   -1                  start of the bed file is 1-based\n\
    -h, --help          print this help info\n\
 \n");
     /*-d, --rmdup         remove dup reads when calculate depth\n	\*/
@@ -483,18 +484,26 @@ static char const * const report_tar[] =
 // FIXME: need broken when bed file is truncated
 int load_bed_init(char const *fn, aux_t * a)
   {
-  if (zero_based) bedHand->read(fn, a->h_tgt, -1, 0);
-  else bedHand->read(fn, a->h_tgt, 0, 0);
+  int ret = 0;
+  bedHand->read(fn, a->h_tgt, 0, 0, &ret);
+  if (zero_based && ret)
+    {
+    errabort("This region is not a standard bed format.\n"
+	     "Please use parameter \"-1\" if your bed file is 1-based!");
+    }
+  if (!zero_based) bedHand->base1to0(a->h_tgt);
   bedHand->merge(a->h_tgt);
   inf_t *inf1 = bedHand->stat(a->h_tgt);
   a->tgt_len = inf1->length;
   a->tgt_nreg = inf1->total;
-  if (zero_based) bedHand->read(fn, a->h_flk, flank_reg-1, flank_reg);
-  else bedHand->read(fn, a->h_flk, flank_reg, flank_reg);
+
+  bedHand->read(fn, a->h_flk, flank_reg, flank_reg, &ret);
+  if (!zero_based) bedHand->base1to0(a->h_flk);
   bedHand->merge(a->h_flk);
   bedHand->diff(a->h_flk, a->h_tgt);
   inf_t *inf2 = bedHand->stat(a->h_flk);
   a->flk_len = inf2->length;
+
   mustfree(inf1);
   mustfree(inf2);
   return 1;
@@ -736,6 +745,8 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
 int check_reachable_regions(loopbams_parameters_t *para, aux_t *a)
   {
   khiter_t k;
+  khiter_t l;
+  int ret = 0;
   for (k = 0; k < kh_end(a->h_tgt); ++k)
     {
     if (kh_exist(a->h_tgt, k))
@@ -743,11 +754,19 @@ int check_reachable_regions(loopbams_parameters_t *para, aux_t *a)
       para->name = (char*)kh_key(a->h_tgt, k);
       para->tar = &kh_val(a->h_tgt, k);
       if (para->tar->flag == 1) continue; // already reach
+      warnings("%s is not contained in this bam file.", para->name);
       count32_init(para->depvals_of_chr);
       para->tar->data = (void*)para->depvals_of_chr;
       para->flk = &kh_val(a->h_flk, k);
       para->tgt_node = bed_depnode_list(para->tar);
       para->flk_node = bed_depnode_list(para->flk);
+      l = kh_put(reg, h_uncov, strdup(para->name), &ret);
+      if (!ret) errabort("this chromosome should be empty! please contact developer to report this bug!");
+      bedreglist_t *ucreg_tmp;
+      ucreg_tmp = (bedreglist_t*)needmem(sizeof(bedreglist_t));
+      kh_val(h_uncov,l) = *ucreg_tmp;
+      para->ucreg = &kh_val(h_uncov, l);
+      
       while (para->tgt_node)
 	{
 	stat_each_region(para, a);
@@ -771,7 +790,7 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
   for (j = 0; j < node->len; ++j)
     count_increase(a->c_flkdep, node->vals[j], uint32_t);
   del_node(para->flk_node);
-  if(para->flk_node && para->flk_node->len == 0) depnode_init(para->flk_node);
+  depnode_init(para->flk_node);
   return 1;
   }
 
@@ -779,6 +798,7 @@ void write_unover_file()
   {
   if (outdir) chdir(outdir);
   bedHand->merge(h_uncov);
+  bedHand->base1to0(h_uncov);
   bedHand->save("uncover.bed", h_uncov);
   bedHand->destroy(h_uncov, destroy_void);
   }
@@ -887,6 +907,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	para->tar->data = (void*)para->depvals_of_chr;
 	if (para->tar->flag || para->flk->flag)
 	  errabort("bam files are not properly sorted\n");
+
 	para->tgt_node = bed_depnode_list(para->tar);
 	para->flk_node = bed_depnode_list(para->flk);
 	para->tar->flag = para->flk->flag =1;
@@ -1184,7 +1205,7 @@ int bamdst(int argc, char *argv[])
   char *probe = 0;
   
   struct opt_aux opt = {.inputs=NULL, .isize_lim = 2000, .mapQ_lim = 20};
-  while ((n = getopt_long(argc, argv, "o:p:f:q:l:h0", long_opts, NULL)) >= 0)
+  while ((n = getopt_long(argc, argv, "o:p:f:q:l:h1", long_opts, NULL)) >= 0)
     {
     switch (n)
       {
@@ -1203,7 +1224,7 @@ int bamdst(int argc, char *argv[])
       case BAMOUT: export_target_bam = strdup(optarg); break;
       case 'q': opt.mapQ_lim = atoi(optarg); break;
       case 'h': usage(1); break;
-      case '0': zero_based = TRUE; break;
+      case '1': zero_based = FALSE; break;
 	//case 'd': rmdup_mark = TRUE; break;
       default: usage(0); 
 	//more help

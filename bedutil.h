@@ -33,15 +33,16 @@ typedef struct
 inf_t;
 
 typedef void (*bedvoid_destroy)(void *data);
-
 void destroy_void(void *data);
+
+typedef void (*handle_func)(regHash_t *bed);
 
 struct _bedHandle
   {
   /* handle inf_t */
   inf_t * (*init)();
   /* handle whole struct */ 
-  void (*read)(const char *fn, regHash_t *reg, int a, int b);
+  void (*read)(const char *fn, regHash_t *reg, int a, int b, int *ret);
   void (*merge)(regHash_t *bed);
   void (*uniq)(regHash_t *bed1, regHash_t *bed2);
   void (*diff)(regHash_t *bed1, regHash_t *bed2);
@@ -59,6 +60,9 @@ struct _bedHandle
   void (*destroy)(regHash_t *rghsh, bedvoid_destroy func);
   /* stat */
   inf_t * (*stat)(regHash_t *bed);
+  void (*base1to0) (regHash_t *bed);
+  void (*base0to1) (regHash_t *bed);
+  void (*pipeout)(regHash_t *bed);
   };
 
 typedef struct _bedHandle bedHandle_t;
