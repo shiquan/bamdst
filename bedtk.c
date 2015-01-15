@@ -95,6 +95,7 @@ int uniqBed(int argc, char * argv[])
   int ret = 0;
   regHash_t * reghash = kh_init(reg);
   bedHand->read(argv[optind], reghash, 0, 0, &ret);
+  bedHand->merge(reghash);
   for (i = 1; i < n; ++i)
     {
     regHash_t * reghash1 = kh_init(reg);
