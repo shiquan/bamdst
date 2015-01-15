@@ -299,7 +299,7 @@ static int usage(void)
 	  "  0to1   <in.bed>\n"
 	  "  1to0   <in.bed>\n"
 	  "=====================================================================================\n"
-	  "Author: Shi Quan (shiquan@genimcis.cn)\n"
+	  "Author: Shi Quan (shiquan@genomics.cn)\n"
 	  "Website:\n"
 	  "https://github.com/shiquan/bamdst\n"
 	  );
