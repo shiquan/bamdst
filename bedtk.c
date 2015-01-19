@@ -48,7 +48,7 @@ int mergeBed(int argc, char * argv[])
   if (one_based) bedHand->base1to0(reghash);
   if (!one_based && ret)
     {
-    errabort("This region is not a standard bed format.\n"
+    warnings("This region is not a standard bed format.\n"
 	     "Please use parameter \"-1\" if your bed file is 1-based!");
     }
 
@@ -106,7 +106,7 @@ int uniqBed(int argc, char * argv[])
     }
   if (ret)
     {
-    errabort("the input bed file might not be standard bed format 0-based, please make sure the input files is in same base system"
+    warnings("the input bed file might not be standard bed format 0-based, please make sure the input files is in same base system"
 	     "you can use '1to0' to trans the base systems first");
     }
 
@@ -158,7 +158,7 @@ int diffBed(int argc, char * argv[])
   inf_t * inf = bedHand->stat(reghash);
   if (ret)
     {
-    errabort("the input bed file might not be standard bed format 0-based, please make sure the input files is in same base system"
+    warnings("the input bed file might not be standard bed format 0-based, please make sure the input files is in same base system"
 	     "you can use '1to0' to trans the base systems first");
     }
 
@@ -216,7 +216,7 @@ int trimBed(int argc, char *argv[])
   bedHand->merge(rghsh);
   if (ret)
     {
-    errabort("the input bed file might not be standard bed format 0-based, please make sure the input files is in same base system"
+    warnings("the input bed file might not be standard bed format 0-based, please make sure the input files is in same base system"
 	     "you can use '1to0' to trans the base systems first");
     }
 

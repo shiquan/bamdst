@@ -120,8 +120,8 @@ bed_read(const char *fn, regHash_t * reghash, int add1, int add2, int *ret)
     if (beg <= 0) beg = 1;
     if (beg == end)
       {
-      //errabort("This region has the same start and end, not a bed format : %d\t%d\n"
-      //	       "Please use parameter \"-1\" if your bed file is 1-based!", beg, end);
+      warnings("begin == stop, only happened in insert variation. "
+	       "make sure your bed file is 0-based! : %u\t%u", beg, end);
       *ret = 1;
       }
     if (p->m == p->n)

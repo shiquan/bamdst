@@ -184,9 +184,10 @@ bed_depnode_list(bedreglist_t *bed)
   for ( i = 0; i < bed->m; ++i)
     {
     node = (struct depnode*)needmem(sizeof(struct depnode));
-    node->start = (uint32_t)(bed->a[i] >> 32) + 1; // 0-based to 1-based
+    node->start = (uint32_t)(bed->a[i] >> 32);
     node->stop = (uint32_t)bed->a[i];
-
+    if (node->start < node->stop) node->start++; // 0-based to 1-based, sametimes inertion variation have same beg and end pos
+    
     /* the length of this region should be zero if not allocated memory yet
     *  Assign the length value when init the vals and cnts */
     node->len = 0;
@@ -488,7 +489,7 @@ int load_bed_init(char const *fn, aux_t * a)
   bedHand->read(fn, a->h_tgt, 0, 0, &ret);
   if (zero_based && ret)
     {
-    errabort("This region is not a standard bed format.\n"
+    warnings("This region is not a standard bed format.\n"
 	     "Please use parameter \"-1\" if your bed file is 1-based!");
     }
   if (!zero_based) bedHand->base1to0(a->h_tgt);
