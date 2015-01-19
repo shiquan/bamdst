@@ -48,7 +48,7 @@ int mergeBed(int argc, char * argv[])
   if (one_based) bedHand->base1to0(reghash);
   if (!one_based && ret)
     {
-    warnings("This region is not a standard bed format.\n"
+    warnings("This region might not not a standard bed format."
 	     "Please use parameter \"-1\" if your bed file is 1-based!");
     }
 

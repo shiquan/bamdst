@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.0 beta";
+static char const *Version = "1.0.0 delta";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -433,20 +433,29 @@ static float coverage_cal(const uint32_t * array, int l)
 // ugly report!!! 
 static char const * const report_total[] =
   {
-  "[Total] Raw Reads (All reads)", "[Total] QC Fail reads",
-  "[Total] Raw Data(Mb)",
-  "[Total] Paired Reads", "[Total] Mapped Reads",
-  "[Total] Fraction of Mapped Reads",
-  "[Total] Mapped Data(Mb)", "[Total] Fraction of Mapped Data(Mb)",
-  "[Total] Properly paired",
-  "[Total] Fraction of Properly paired", "[Total] Read and mate paired",
-  "[Total] Fraction of Read and mate paired", "[Total] Singletons",
-  "[Total] Read and mate map to diff chr", "[Total] Read1", "[Total] Read2",
-  "[Total] forward strand reads", "[Total] backward strand reads",
-  "[Total] PCR duplicate reads", "[Total] Fraction of PCR duplicate reads",
-  "[Total] Map quality cutoff value",
-  "[Total] MapQuality above cutoff reads",
-  "[Total] Fraction of MapQ reads in all reads",
+  "[Total] Raw Reads (All reads)",		  
+  "[Total] QC Fail reads",			  
+  "[Total] Raw Data(Mb)",			  
+  "[Total] Paired Reads",			  
+  "[Total] Mapped Reads",			  
+  "[Total] Fraction of Mapped Reads",		  
+  "[Total] Mapped Data(Mb)",			  
+  "[Total] Fraction of Mapped Data(Mb)",	  
+  "[Total] Properly paired",			  
+  "[Total] Fraction of Properly paired",	  
+  "[Total] Read and mate paired",		  
+  "[Total] Fraction of Read and mate paired",	  
+  "[Total] Singletons",				  
+  "[Total] Read and mate map to diff chr",	  
+  "[Total] Read1",				  
+  "[Total] Read2",				  
+  "[Total] forward strand reads",		  
+  "[Total] backward strand reads",		  
+  "[Total] PCR duplicate reads",		  
+  "[Total] Fraction of PCR duplicate reads",	  
+  "[Total] Map quality cutoff value",		  
+  "[Total] MapQuality above cutoff reads",	  
+  "[Total] Fraction of MapQ reads in all reads",  
   "[Total] Fraction of MapQ reads in mapped reads"
   };
 
@@ -1104,30 +1113,30 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     fprintf(fc, "## Files : ");
     for (i = 0;  i < f->nfiles; ++i) fprintf(fc, "%s ", f->inputs[i]);
     fprintf(fc, "\n");
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[0], fs->n_reads);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[1], fs->n_qcfail);
-    fprintf(fc, "%60s\t%.2f\n", report_total[2], (float)fs->n_data / 1e6);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[3], fs->n_pair_all);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[4], fs->n_mapped);
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[5], (float)fs->n_mapped / fs->n_reads *100);
-    fprintf(fc, "%60s\t%.2f\n", report_total[6], fs->n_mdata / 1e6);
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_mdata / fs->n_data *100);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[8], fs->n_pair_good);
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_pair_good / fs->n_reads *100);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[9], fs->n_pair_map);
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[10], (float)fs->n_pair_map / fs->n_reads *100);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[11], fs->n_sgltn);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[13], fs->n_diffchr);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[14], fs->n_read1);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[15], fs->n_read2);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[16], fs->n_pstrand);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[17], fs->n_mstrand);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[18], fs->n_dup);
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[19], (float)fs->n_dup / fs->n_reads *100);
-    fprintf(fc, "%60s\t%d\n", report_total[20], f->mapQ_lim);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[21], fs->n_qual);
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[22], (float)fs->n_qual / fs->n_reads * 100);
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[23], (float)fs->n_qual / fs->n_mapped *100);
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[0], fs->n_reads);                               // "[Total] Raw Reads (All reads)",		  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[1], fs->n_qcfail);				  // "[Total] QC Fail reads",			  
+    fprintf(fc, "%60s\t%.2f\n", report_total[2], (float)fs->n_data / 1e6);			  // "[Total] Raw Data(Mb)",			  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[3], fs->n_pair_all);				  // "[Total] Paired Reads",			  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[4], fs->n_mapped);				  // "[Total] Mapped Reads",			  
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[5], (float)fs->n_mapped / fs->n_reads *100);	  // "[Total] Fraction of Mapped Reads",		  
+    fprintf(fc, "%60s\t%.2f\n", report_total[6], fs->n_mdata / 1e6);				  // "[Total] Mapped Data(Mb)",			  
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_mdata / fs->n_data *100);	  // "[Total] Fraction of Mapped Data(Mb)",	  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[8], fs->n_pair_good);				  // "[Total] Properly paired",			  
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[9], (float)fs->n_pair_good / fs->n_reads *100);	  // "[Total] Fraction of Properly paired",	  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[10], fs->n_pair_map);				  // "[Total] Read and mate paired",		  
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[11], (float)fs->n_pair_map / fs->n_reads *100);	  // "[Total] Fraction of Read and mate paired",	  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[12], fs->n_sgltn);				  // "[Total] Singletons",				  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[13], fs->n_diffchr);				  // "[Total] Read and mate map to diff chr",	  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[14], fs->n_read1);				  // "[Total] Read1",				  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[15], fs->n_read2);				  // "[Total] Read2",				  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[16], fs->n_pstrand);				  // "[Total] forward strand reads",		  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[17], fs->n_mstrand);				  // "[Total] backward strand reads",		  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[18], fs->n_dup);				  // "[Total] PCR duplicate reads",		  
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[19], (float)fs->n_dup / fs->n_reads *100);	  // "[Total] Fraction of PCR duplicate reads",	  
+    fprintf(fc, "%60s\t%d\n", report_total[20], f->mapQ_lim);					  // "[Total] Map quality cutoff value",		  
+    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[21], fs->n_qual);				  // "[Total] MapQuality above cutoff reads",	  
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[22], (float)fs->n_qual / fs->n_reads * 100);	  // "[Total] Fraction of MapQ reads in all reads",  
+    fprintf(fc, "%60s\t%.2f%%\n", report_total[23], (float)fs->n_qual / fs->n_mapped *100);	  // "[Total] Fraction of MapQ reads in mapped reads"
     //tgt
     fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[0], fs->n_tgt);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[1], (float)fs->n_tgt / fs->n_reads *100);

@@ -43,7 +43,8 @@ static inf_t *inf_stat(regHash_t *rghsh)
 	uint32_t beg = bed->a[i] >> 32;
 	uint32_t end = (uint32_t)bed->a[i];
 	assert(end >= beg);
-	inf->length += end - beg; // 0based
+	//uint32_t length = end - beg == 0 ? 1 : end - beg ; // 0based
+	inf->length += end -beg;
 	}
 
       inf->total += bed->m;
@@ -120,8 +121,8 @@ bed_read(const char *fn, regHash_t * reghash, int add1, int add2, int *ret)
     if (beg <= 0) beg = 1;
     if (beg == end)
       {
-      warnings("begin == stop, only happened in insert variation. "
-	       "make sure your bed file is 0-based! : %u\t%u", beg, end);
+      //warnings("begin == stop, only happened in insert variation. "
+      //"make sure your bed file is 0-based! : %u\t%u", beg, end);
       *ret = 1;
       }
     if (p->m == p->n)
