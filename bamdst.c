@@ -356,7 +356,7 @@ Optional parameters:\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
    --bamout  BAMFILE   target reads will be exported to this bam file\n\
-   -1                  start of the bed file is 1-based\n\
+   -1                  begin position of bed file is 1-based\n\
    -h, --help          print this help info\n\
 \n");
     /*-d, --rmdup         remove dup reads when calculate depth\n	\*/
@@ -1069,7 +1069,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   {
   fprintf(fchrcov, "%11s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s",
 	  "#Chromosome","DATA(%)","Avg depth","Median","Coverage%","Cov 4x %","Cov 10x %","Cov 30x %","Cov 100x %");
-  if(f->cutoff) fprintf(fchrcov, "Cov %dx", f->cutoff);
+  if(f->cutoff) fprintf(fchrcov, "\tCov %dx", f->cutoff);
   fprintf(fchrcov,"\n");
   khiter_t k;
   for (k = 0; k != kh_end(a->h_tgt); ++k)
@@ -1092,13 +1092,13 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	per = (float)data/fs->n_tdata*100.0;
 	fprintf(fchrcov, "%11s\t%8.2f\t%8.2f\t%9.1f\t%8.2f\t%8.2f\t%8.2f\t%8.2f\t%8.2f",
 	      name, per, avg, med, chrcov->cov, chrcov->cov4, chrcov->cov10, chrcov->cov30, chrcov->cov100);
-	if (f->cutoff) fprintf(fchrcov, "%.2f", chrcov->covx);
+	if (f->cutoff) fprintf(fchrcov, "\t%.2f", chrcov->covx);
 	}
       else
 	{
 	fprintf(fchrcov, "%11s\t%8.2f\t%8.2f\t%8.1f\t%8.1f\t%8.1f\t%8.1f\t%8.1f\t%8.1f",
 		name, (float)0, (float)0, (float)0, (float)0, (float)0, (float)0, (float)0, (float)0);
-	if (f->cutoff) fprintf(fchrcov, "%5.4f", (float)0);
+	if (f->cutoff) fprintf(fchrcov, "\t%5.4f", (float)0);
 	}
       fprintf(fchrcov, "\n");
       }
@@ -1151,6 +1151,12 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[10], tarcov->cov10);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[11], tarcov->cov30);
     fprintf(fc, "%60s\t%.2f%%\n", report_tar[12], tarcov->cov100);
+    if (f->cutoff)
+      {
+      char titles[40];
+      sprintf(titles,"[Target] Coverage (>=%ux)", f->cutoff);
+      fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->covx);
+      }
     //tgt regions
     fprintf(fc, "%60s\t%u\n", report_tar[13], a->tgt_nreg);
     fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[14], regcov->cnt);
