@@ -351,6 +351,7 @@ Option -o and -p are mandatory:\n\
     puts ("\
 Optional parameters:\n\
    -f, --flank [200]   flank n bp of each region\n\
+   -q [20]             map quality cutoff value\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
    --cutoffdepth [0]   list the coverage of above depths\n\
    --isize [2000]      stat the inferred insert size under this value\n\
