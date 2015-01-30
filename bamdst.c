@@ -1213,16 +1213,22 @@ static struct option const long_opts[] =
   {"uncover", required_argument, NULL, UNCOVER},
   {"bamout", required_argument, NULL, BAMOUT},
   //{"rmdup", no_argument, NULL, 'd'},
-  {"help", no_argument, NULL, 'h'}
+  {"help", no_argument, NULL, 'h'},
+  {"version", no_argument, NULL, 'v'}
   };
 
+int show_version()
+  {
+  printf("%s\n", Version);
+  return 1;
+  }
 int bamdst(int argc, char *argv[])
   {
   int n, i;
   char *probe = 0;
   
   struct opt_aux opt = {.inputs=NULL, .isize_lim = 2000, .mapQ_lim = 20};
-  while ((n = getopt_long(argc, argv, "o:p:f:q:l:h1", long_opts, NULL)) >= 0)
+  while ((n = getopt_long(argc, argv, "o:p:f:q:l:h1v", long_opts, NULL)) >= 0)
     {
     switch (n)
       {
@@ -1241,6 +1247,7 @@ int bamdst(int argc, char *argv[])
       case BAMOUT: export_target_bam = strdup(optarg); break;
       case 'q': opt.mapQ_lim = atoi(optarg); break;
       case 'h': usage(1); break;
+      case 'v': return show_version();
       case '1': zero_based = FALSE; break;
 	//case 'd': rmdup_mark = TRUE; break;
       default: usage(0); 
