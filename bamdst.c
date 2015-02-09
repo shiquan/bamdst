@@ -81,13 +81,50 @@ static const int WINDOW_SIZE = 64 * 1024;
 
 static char *outdir = NULL;
 
-static int uncover_cutoff = 5;
 // init hash struct to store uncover regions
-regHash_t *h_uncov;
+static int uncover_cutoff = 5;
+static regHash_t *h_uncov;
 
 void h_uncov_init()
   {
   h_uncov = kh_init(reg);
+  }
+
+// init hash struct to store chromosome length
+static chrHash_t *h_chrlen;
+void h_chrlength_init()
+  {
+  h_chrlen = kh_init(chr);
+  }
+
+// warp bamheader to retrieve chromosome legth hash
+void header2chrhash(bam_header_t *h)
+  {
+  int i, n, ret;
+  khiter_t k;
+  h->dict = sam_header_parse2(h->text);
+  const char *tags[] = {"SN", "LN", "UR", "M5", NULL};
+  char **tbl = sam_header2tbl_n(h->dict, "SQ", tags, &n);
+  for (i = 0; i < n; i++)
+    {
+    k = kh_put(chr, h_chrlen, strdup(tbl[4*i]), &ret);
+    kh_val(h_chrlen, k).length = atoi(tbl[4*i+1]);
+    }
+  if (tbl) free(tbl);
+  }
+
+void chrhash_destroy()
+  {
+  khiter_t k;
+  if (h_chrlen)
+    {
+    for (k = 0; k < kh_end(h_chrlen); ++k)
+      {
+      if (kh_exist(h_chrlen, k)) freemem((char*)kh_key(h_chrlen, k));
+      // skip destroy void data...
+      }
+    kh_destroy(chr, h_chrlen);
+    }
   }
 
 /* @FLANK_REGION coverage of flank region list in report.
@@ -504,13 +541,21 @@ int load_bed_init(char const *fn, aux_t * a)
     }
   if (!zero_based) bedHand->base1to0(a->h_tgt);
   bedHand->merge(a->h_tgt);
+  int nchr;
+  nchr = bedHand->check_length(a->h_tgt, h_chrlen);
+  if (nchr != -1)
+    {
+    errabort(" The bed region is out the range of this chromosome %s. The max length is %u ..",
+	     (char*)kh_key(h_chrlen, (khiter_t)nchr), kh_val(h_chrlen, (khiter_t)nchr).length);;
+    }
   inf_t *inf1 = bedHand->stat(a->h_tgt);
   a->tgt_len = inf1->length;
   a->tgt_nreg = inf1->total;
-
+  
   bedHand->read(fn, a->h_flk, flank_reg, flank_reg, &ret);
   if (!zero_based) bedHand->base1to0(a->h_flk);
   bedHand->merge(a->h_flk);
+  bedHand->check_length(a->h_tgt, h_chrlen); // warp the length accord to the chromosome length
   bedHand->diff(a->h_flk, a->h_tgt);
   inf_t *inf2 = bedHand->stat(a->h_flk);
   a->flk_len = inf2->length;
@@ -1247,7 +1292,7 @@ int bamdst(int argc, char *argv[])
       case BAMOUT: export_target_bam = strdup(optarg); break;
       case 'q': opt.mapQ_lim = atoi(optarg); break;
       case 'h': usage(1); break;
-      case 'v': return show_version();
+      case 'v': return show_version(); 
       case '1': zero_based = FALSE; break;
 	//case 'd': rmdup_mark = TRUE; break;
       default: usage(0); 
@@ -1308,7 +1353,10 @@ int bamdst(int argc, char *argv[])
       errabort("%s : %s", export_target_bam, strerror(errno));
     bam_header_write(bamoutfp, aux->h);
     }
+  h_chrlength_init();
+  header2chrhash(aux->h);
   load_bed_init(probe, aux);
+  chrhash_destroy();
   freemem(probe);
   aux->c_isize->a = calloc(opt.isize_lim, sizeof(unsigned));
   for (i = 0; i < opt.isize_lim; ++i) aux->c_isize->a[i] = 0;

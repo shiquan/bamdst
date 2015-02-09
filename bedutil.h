@@ -21,8 +21,17 @@ typedef struct
   }
 bedreglist_t;
 
+typedef struct
+  {
+  uint32_t length;
+  void *data;
+  }
+chromosome_t;
+
 KHASH_MAP_INIT_STR(reg, bedreglist_t)
+KHASH_MAP_INIT_STR(chr, chromosome_t)
 typedef kh_reg_t regHash_t;
+typedef kh_chr_t chrHash_t;
 
 typedef struct
   {
@@ -63,6 +72,12 @@ struct _bedHandle
   void (*base1to0) (regHash_t *bed);
   void (*base0to1) (regHash_t *bed);
   void (*pipeout)(regHash_t *bed);
+
+  /* if the region is out of chromosome return khiter, else 
+     return -1 : normal 
+     return -2 : the chomosome is not contaioned in chrHash
+  */
+  int (*check_length)(regHash_t * bed, chrHash_t *chr);
   };
 
 typedef struct _bedHandle bedHandle_t;

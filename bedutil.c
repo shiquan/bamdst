@@ -586,7 +586,7 @@ static void bed_1to0(regHash_t *reghash)
 	{
 	uint32_t beg = (kh_val(reghash, k).a[i] >>32) -1;
 	uint32_t end = (uint32_t)kh_val(reghash, k).a[i];
-	if (isZero(beg)) errabort("the beg is 0: %u\t%u", beg, end);
+	//if (isZero(beg)) errabort("the beg is 0: %u\t%u", beg, end);
 	kh_val(reghash, k).a[i] = (uint64_t)beg <<32|end;
 	}
       }
@@ -652,6 +652,39 @@ static void bed_pipeout(regHash_t *reghash)
   fflush(stdout);
   }
 
+static int bed_check_chromosome_length (regHash_t *reghash, chrHash_t *chrhash)
+  {
+  khiter_t k, l;
+  int i;
+  for (k = 0; k < kh_end(reghash); ++k)
+    {
+    if (kh_exist(reghash, k))
+      {
+      char *key = (char*)kh_key(reghash, k);
+      l = kh_get(chr, chrhash, key);
+      if (l == kh_end(chrhash)) return -2;
+      uint32_t length = kh_val(chrhash, l).length;
+      for (i = 0; i < kh_val(reghash, k).m; ++i)
+	{
+	uint32_t beg = kh_val(reghash, k).a[i] >>32;
+	if (beg >= length)
+	  {
+	  kh_val(reghash, k).m = i;
+	  return (int)l;
+	  }
+	uint32_t end = (uint32_t)kh_val(reghash, k).a[i];
+	if (end > length)
+	  {
+	  kh_val(reghash, k).a[i] = (uint64_t)beg << 32 | length;
+	  kh_val(reghash, k).m = i > 1 ? i -1 : 1;
+	  return (int)l;
+	  }
+	}
+      }
+    }
+  return -1;
+  }
+
 static bedHandle_t defaultBedHandler =
   {
   inf_init,
@@ -672,6 +705,7 @@ static bedHandle_t defaultBedHandler =
   bed_1to0,
   bed_0to1,
   bed_pipeout,
+  bed_check_chromosome_length,
   };
 
 bedHandle_t const *bedHand = &defaultBedHandler;
