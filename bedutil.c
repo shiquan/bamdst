@@ -16,17 +16,17 @@ KSTREAM_INIT(gzFile, gzread, 8192)
 #define swapvalue(a, b, t) {t c = a; a = b; b = c;}
 
 static inf_t *inf_init()
-{
- inf_t *inf;
- inf = (inf_t*)needmem(sizeof(inf_t));
- inf->total = inf->length = inf->region = 0;
- return inf;
-}
+  {
+  inf_t *inf;
+  inf = (inf_t*)needmem(sizeof(inf_t));
+  inf->total = inf->length = inf->region = 0;
+  return inf;
+  }
 
 static void sort_reg(bedreglist_t *reg)
-{
- ks_introsort(uint64_t, reg->m, reg->a);
-}
+  {
+  ks_introsort(uint64_t, reg->m, reg->a);
+  }
 
 static inf_t *inf_stat(regHash_t *rghsh)
   {
@@ -53,6 +53,9 @@ static inf_t *inf_stat(regHash_t *rghsh)
   return inf;
   }
 
+/*
+ * read bed file (0-based chromosome begin end) and tsv file (1-based chromosome posotion)
+ */
 static void
 bed_read(const char *fn, regHash_t * reghash, int add1, int add2, int *ret) 
   {
@@ -103,7 +106,7 @@ bed_read(const char *fn, regHash_t * reghash, int add1, int add2, int *ret)
 	}
       }
     if (beg < 0) beg = 0;
-    if (end <= 0)
+    if (end == 0) // treat as tsv file
       {
       // this is different from bed_read in bedidx.c
       end = beg;

@@ -262,7 +262,7 @@ struct _aux
 
   // count struct of depths, insertsize, flank depths, target regions
   count32_t *c_dep;
-  //count32_t *c_cov; // for coverage
+  count32_t *c_rmdupdep;
   count32_t *c_isize;
   count32_t *c_flkdep;
   count32_t *c_reg;
@@ -280,7 +280,7 @@ struct _aux  *aux_init()
   a->h_tgt = kh_init(reg);
   a->h_flk = kh_init(reg);
   count32_init(a->c_dep);
-  //count32_init(a->c_cov);
+  count32_init(a->c_rmdupdep);
   count32_init(a->c_isize);
   count32_init(a->c_flkdep);
   count32_init(a->c_reg);
@@ -300,6 +300,7 @@ void aux_destroy(struct _aux *a)
   bedHand->destroy((void *)a->h_flk, destroy_void);
   bam_header_destroy(a->h);
   count_destroy(a->c_dep);
+  count_destroy(a->c_rmdupdep);
   count_destroy(a->c_flkdep);
   count_destroy(a->c_isize);
   count_destroy(a->c_reg);
@@ -310,7 +311,7 @@ typedef struct bamflag
   {
   uint64_t n_reads, n_mapped, n_pair_map, n_pair_all, n_pair_good;
   uint64_t n_sgltn, n_read1, n_read2;
-  uint64_t n_dup;
+  uint64_t n_dup, n_rmdup1, n_rmdup2;
   uint64_t n_diffchr, n_pstrand, n_mstrand;
   uint64_t n_qcfail;
   uint64_t n_data, n_mdata;
@@ -318,6 +319,7 @@ typedef struct bamflag
   /* delete n_uniq
    * ref:  https://www.biostars.org/p/59281/ */
   uint64_t n_tgt, n_flk, n_tdata, n_fdata;
+  uint64_t n_trmdat; // target rmdup data
   } bamflag_t;
 
 // use this macro to stat the flags 
@@ -468,66 +470,6 @@ static float coverage_cal(const uint32_t * array, int l)
   return cov * 100;
   }
 
-// ugly report!!! 
-static char const * const report_total[] =
-  {
-  "[Total] Raw Reads (All reads)",		  
-  "[Total] QC Fail reads",			  
-  "[Total] Raw Data(Mb)",			  
-  "[Total] Paired Reads",			  
-  "[Total] Mapped Reads",			  
-  "[Total] Fraction of Mapped Reads",		  
-  "[Total] Mapped Data(Mb)",			  
-  "[Total] Fraction of Mapped Data(Mb)",	  
-  "[Total] Properly paired",			  
-  "[Total] Fraction of Properly paired",	  
-  "[Total] Read and mate paired",		  
-  "[Total] Fraction of Read and mate paired",	  
-  "[Total] Singletons",				  
-  "[Total] Read and mate map to diff chr",	  
-  "[Total] Read1",				  
-  "[Total] Read2",				  
-  "[Total] forward strand reads",		  
-  "[Total] backward strand reads",		  
-  "[Total] PCR duplicate reads",		  
-  "[Total] Fraction of PCR duplicate reads",	  
-  "[Total] Map quality cutoff value",		  
-  "[Total] MapQuality above cutoff reads",	  
-  "[Total] Fraction of MapQ reads in all reads",  
-  "[Total] Fraction of MapQ reads in mapped reads"
-  };
-
-static char const * const report_tar[] =
-  {
-  "[Target] Target Reads", "[Target] Fraction of Target Reads in all reads",
-  "[Target] Fraction of Target Reads in mapped reads",
-  "[Target] Target Data(Mb)",
-  "[Target] Fraction of Target Data in all data",
-  "[Target] Fraction of Target Data in mapped data",
-  "[Target] Len of region", "[Target] Average depth",
-  "[Target] Coverage (>0x)",
-  "[Target] Coverage (>=4x)", "[Target] Coverage (>=10x)",
-  "[Target] Coverage (>=30x)", "[Target] Coverage (>=100x)",
-  "[Target] Target Region Count",
-  "[Target] Region covered > 0x",
-  "[Target] Fraction Region covered > 0x",
-  //"[Target] Region covered >= 4x",
-  "[Target] Fraction Region covered >= 4x",
-  //"[Target] Region covered >= 10x",
-  "[Target] Fraction Region covered >= 10x",
-  //"[Target] Region covered >= 30x",
-  "[Target] Fraction Region covered >= 30x",
-  //"[Target] Region covered >= 100x",
-  "[Target] Fraction Region covered >= 100x",
-  "[flank] flank size", "[flank] Len of region (not include target region)", "[flank] Average depth",
-  "[flank] flank Reads", "[flank] Fraction of flank Reads in all reads",
-  "[flank] Fraction of flank Reads in mapped reads",
-  "[flank] flank Data(Mb)",
-  "[flank] Fraction of flank Data in all data",
-  "[flank] Fraction of flank Data in mapped data", "[flank] Coverage (>0x)",
-  "[flank] Coverage (>=4x)", "[flank] Coverage (>=10x)",
-  "[flank] Coverage (>=30x)", "[flank] Coverage (>=100x)"
-  };
 
 // FIXME: need broken when bed file is truncated
 int load_bed_init(char const *fn, aux_t * a)
@@ -755,6 +697,7 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
       // use covdep to calculate coverage and averge depth
       count_increase(para->depvals_of_chr, node->covdep[j], uint32_t);
       count_increase(a->c_dep, node->covdep[j], uint32_t);
+      count_increase(a->c_rmdupdep, node->rmdupdep[j], uint32_t);
       /* store the uncover region */
       if (node->covdep[j] < uncover_cutoff)
 	{
@@ -894,7 +837,15 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
       bam1_core_t *c = &b->core;
       flagstat(fs, c, ret);
       if (c->qual > f->mapQ_lim) fs->n_qual++;
-      if (ret > 1) state = CDUP;
+      if (ret > 1)
+	{
+	state = CDUP;
+	}
+      else
+	{
+	if (c->flag & BAM_FREAD1) fs->n_rmdup1++;
+	if (c->flag & BAM_FREAD2) fs->n_rmdup2++;
+	}
       if (c->tid == -1) goto endcore; // unmapped~
 
       /* stat the insertsize */
@@ -1057,7 +1008,7 @@ uint64_t cntcov_cal(struct opt_aux *f,
   return rawcnt;
   }
 
-// need improve soon!!!
+// FIXME: need improve soon!!!
 float median_cnt(count32_t *cnt)
   {
   int i;
@@ -1110,6 +1061,8 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
   cntcov_cal(f, regcov, a->c_reg, &fs->n_fdata);
   //merge_cnt(a->c_flkdep, a->c_dep);
   cntcov_cal(f, flkcov, a->c_flkdep, &fs->n_fdata);
+  for (i = 0; i < a->c_rmdupdep->m; ++i)
+    fs->n_trmdat += a->c_rmdupdep->a[i] * i;
 
   FILE *fchrcov = open_wfile("chromosomes.report");
   {
@@ -1151,7 +1104,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     }
   }
   fclose(fchrcov);
-  FILE *fc = open_wfile("coverage.report");       
+  FILE *fc = open_wfile("coverage.report");
   do
     {
     fprintf(fc, "## The file was created by %s\n", program_name);
@@ -1159,44 +1112,48 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     fprintf(fc, "## Files : ");
     for (i = 0;  i < f->nfiles; ++i) fprintf(fc, "%s ", f->inputs[i]);
     fprintf(fc, "\n");
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[0], fs->n_reads);                               // "[Total] Raw Reads (All reads)",		  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[1], fs->n_qcfail);				  // "[Total] QC Fail reads",			  
-    fprintf(fc, "%60s\t%.2f\n", report_total[2], (float)fs->n_data / 1e6);			  // "[Total] Raw Data(Mb)",			  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[3], fs->n_pair_all);				  // "[Total] Paired Reads",			  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[4], fs->n_mapped);				  // "[Total] Mapped Reads",			  
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[5], (float)fs->n_mapped / fs->n_reads *100);	  // "[Total] Fraction of Mapped Reads",		  
-    fprintf(fc, "%60s\t%.2f\n", report_total[6], fs->n_mdata / 1e6);				  // "[Total] Mapped Data(Mb)",			  
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[7], (float)fs->n_mdata / fs->n_data *100);	  // "[Total] Fraction of Mapped Data(Mb)",	  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[8], fs->n_pair_good);				  // "[Total] Properly paired",			  
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[9], (float)fs->n_pair_good / fs->n_reads *100);	  // "[Total] Fraction of Properly paired",	  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[10], fs->n_pair_map);				  // "[Total] Read and mate paired",		  
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[11], (float)fs->n_pair_map / fs->n_reads *100);	  // "[Total] Fraction of Read and mate paired",	  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[12], fs->n_sgltn);				  // "[Total] Singletons",				  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[13], fs->n_diffchr);				  // "[Total] Read and mate map to diff chr",	  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[14], fs->n_read1);				  // "[Total] Read1",				  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[15], fs->n_read2);				  // "[Total] Read2",				  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[16], fs->n_pstrand);				  // "[Total] forward strand reads",		  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[17], fs->n_mstrand);				  // "[Total] backward strand reads",		  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[18], fs->n_dup);				  // "[Total] PCR duplicate reads",		  
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[19], (float)fs->n_dup / fs->n_reads *100);	  // "[Total] Fraction of PCR duplicate reads",	  
-    fprintf(fc, "%60s\t%d\n", report_total[20], f->mapQ_lim);					  // "[Total] Map quality cutoff value",		  
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_total[21], fs->n_qual);				  // "[Total] MapQuality above cutoff reads",	  
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[22], (float)fs->n_qual / fs->n_reads * 100);	  // "[Total] Fraction of MapQ reads in all reads",  
-    fprintf(fc, "%60s\t%.2f%%\n", report_total[23], (float)fs->n_qual / fs->n_mapped *100);	  // "[Total] Fraction of MapQ reads in mapped reads"
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Raw Reads (All reads)", fs->n_reads); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] QC Fail reads", fs->n_qcfail); 
+    fprintf(fc, "%60s\t%.2f\n", "[Total] Raw Data(Mb)", (float)fs->n_data / 1e6); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Paired Reads", fs->n_pair_all);
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Mapped Reads", fs->n_mapped); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of Mapped Reads", (float)fs->n_mapped / fs->n_reads *100); 
+    fprintf(fc, "%60s\t%.2f\n", "[Total] Mapped Data(Mb)", fs->n_mdata / 1e6); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of Mapped Data(Mb)", (float)fs->n_mdata / fs->n_data *100); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Properly paired", fs->n_pair_good); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of Properly paired", (float)fs->n_pair_good / fs->n_reads *100); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Read and mate paired", fs->n_pair_map); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of Read and mate paired", (float)fs->n_pair_map / fs->n_reads *100); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Singletons", fs->n_sgltn); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Read and mate map to diff chr", fs->n_diffchr); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Read1", fs->n_read1); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Read2",fs->n_read2); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Read1(rmdup)", fs->n_rmdup1); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] Read2(rmdup)",fs->n_rmdup2); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] forward strand reads", fs->n_pstrand); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] backward strand reads", fs->n_mstrand); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] PCR duplicate reads", fs->n_dup); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of PCR duplicate reads", (float)fs->n_dup / fs->n_reads *100); 
+    fprintf(fc, "%60s\t%d\n", "[Total] Map quality cutoff value", f->mapQ_lim); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] MapQuality above cutoff reads", fs->n_qual); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of MapQ reads in all reads", (float)fs->n_qual / fs->n_reads * 100); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of MapQ reads in mapped reads", (float)fs->n_qual / fs->n_mapped *100); 
     //tgt
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[0], fs->n_tgt);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[1], (float)fs->n_tgt / fs->n_reads *100);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[2], (float)fs->n_tgt / fs->n_mapped*100);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[3], (float)fs->n_tdata / 1e6);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[4], (float)fs->n_tdata / fs->n_data *100);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[5], (float)fs->n_tdata / fs->n_mdata*100);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[6], a->tgt_len);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[7], (float)fs->n_tdata / a->tgt_len);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[8], tarcov->cov);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[9], tarcov->cov4);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[10], tarcov->cov10);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[11], tarcov->cov30);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[12], tarcov->cov100);
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Target] Target Reads", fs->n_tgt);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction of Target Reads in all reads", (float)fs->n_tgt / fs->n_reads *100);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction of Target Reads in mapped reads", (float)fs->n_tgt / fs->n_mapped*100);
+    fprintf(fc, "%60s\t%.2f\n", "[Target] Target Data(Mb)", (float)fs->n_tdata / 1e6);
+    fprintf(fc, "%60s\t%.2f\n", "[Target] Target Data Rmdup(Mb)", (float)fs->n_trmdat / 1e6);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction of Target Data in all data", (float)fs->n_tdata / fs->n_data *100);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction of Target Data in mapped data", (float)fs->n_tdata / fs->n_mdata*100);
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Target] Len of region", a->tgt_len);
+    fprintf(fc, "%60s\t%.2f\n", "[Target] Average depth", (float)fs->n_tdata / a->tgt_len);
+    fprintf(fc, "%60s\t%.2f\n", "[Target] Average depth(rmdup)", (float)fs->n_trmdat / a->tgt_len);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>0x)", tarcov->cov);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=4x)", tarcov->cov4);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=10x)", tarcov->cov10);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=30x)", tarcov->cov30);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=100x)", tarcov->cov100);
     if (f->cutoff)
       {
       char titles[40];
@@ -1204,28 +1161,28 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
       fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->covx);
       }
     //tgt regions
-    fprintf(fc, "%60s\t%u\n", report_tar[13], a->tgt_nreg);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[14], regcov->cnt);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[15], regcov->cov);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[16], regcov->cov4);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[17], regcov->cov10);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[18], regcov->cov30);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[19], regcov->cov100);
+    fprintf(fc, "%60s\t%u\n", "[Target] Target Region Count", a->tgt_nreg); 
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[Target] Region covered > 0x", regcov->cnt);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered > 0x", regcov->cov);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 4x", regcov->cov4);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 10x", regcov->cov10);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 30x", regcov->cov30);
+    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 100x", regcov->cov100);
     //flk
-    fprintf(fc, "%60s\t%u\n", report_tar[20], flank_reg);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[21], a->flk_len);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[22], (float)fs->n_fdata / a->flk_len);
-    fprintf(fc, "%60s\t%"PRIu64"\n", report_tar[23], fs->n_flk);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[24], (float)fs->n_flk / fs->n_reads *100);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[25], (float)fs->n_flk / fs->n_mapped*100);
-    fprintf(fc, "%60s\t%.2f\n", report_tar[26], (float)fs->n_fdata / 1e6);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[27], (float)fs->n_fdata / fs->n_data *100);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[28], (float)fs->n_fdata / fs->n_mdata*100);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[29], flkcov->cov);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[30], flkcov->cov4);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[31], flkcov->cov10);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[32], flkcov->cov30);
-    fprintf(fc, "%60s\t%.2f%%\n", report_tar[33], flkcov->cov100);
+    fprintf(fc, "%60s\t%u\n", "[flank] flank size", flank_reg);
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[flank] Len of region (not include target region)", a->flk_len);
+    fprintf(fc, "%60s\t%.2f\n", "[flank] Average depth", (float)fs->n_fdata / a->flk_len);
+    fprintf(fc, "%60s\t%"PRIu64"\n", "[flank] flank Reads", fs->n_flk);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Fraction of flank Reads in all reads", (float)fs->n_flk / fs->n_reads *100);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Fraction of flank Reads in mapped reads", (float)fs->n_flk / fs->n_mapped*100);
+    fprintf(fc, "%60s\t%.2f\n", "[flank] flank Data(Mb)", (float)fs->n_fdata / 1e6);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Fraction of flank Data in all data", (float)fs->n_fdata / fs->n_data *100);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Fraction of flank Data in mapped data", (float)fs->n_fdata / fs->n_mdata*100);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>0x)", flkcov->cov);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=4x)", flkcov->cov4);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=10x)", flkcov->cov10);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=30x)", flkcov->cov30);
+    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=100x)", flkcov->cov100);
     }
   while(0);
   
