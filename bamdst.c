@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.0 delta";
+static char const *Version = "1.0.1";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -377,10 +377,11 @@ void usage(int status)
   else
     {
     printf ("\n\
+bamdst version: %s\n\
 USAGE : %s [OPTION] -p <probe.bed> -o <output_dir> [in1.bam [in2.bam ... ]]\n\
    or : %s [OPTION] -p <probe.bed> -o <output_dir> -\n\
 ",
-	    program_name, program_name);
+	    Version, program_name, program_name);
     puts ("\
 Option -o and -p are mandatory:\n\
   -o, --outdir         output dir\n\
