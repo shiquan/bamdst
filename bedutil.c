@@ -52,6 +52,16 @@ static inf_t *inf_stat(regHash_t *rghsh)
     }
   return inf;
   }
+/*
+ * return the names of the chromosomes and the total number 
+ * Inspired by Petr Danecek's regidx.c
+ */
+/* static char **seq_names(regHash_t *reghash, int *n) */
+/*   { */
+/*   int m = 2; */
+/*   char **name = needmem(m, sizeof(char*)); */
+
+/*   } */
 
 /*
  * read bed file (0-based chromosome begin end) and tsv file (1-based chromosome posotion)
@@ -665,7 +675,11 @@ static int bed_check_chromosome_length (regHash_t *reghash, chrHash_t *chrhash)
       {
       char *key = (char*)kh_key(reghash, k);
       l = kh_get(chr, chrhash, key);
-      if (l == kh_end(chrhash)) return -2;
+      if (l == kh_end(chrhash))
+	{
+	warnings("There is no chromosome %s in this bam file!", key);
+	continue;
+	}
       uint32_t length = kh_val(chrhash, l).length;
       for (i = 0; i < kh_val(reghash, k).m; ++i)
 	{

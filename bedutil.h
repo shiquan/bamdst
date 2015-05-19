@@ -2,9 +2,29 @@
 //  bedutil.h
 //
 // Created by shiquan on 5/18/14.
-// Copyright (c) 2014 ___BGIRESEARCH___. All rights reserved.
+// Copyright (c) 2014 ___BGIRESEARCH___. 
 //
-
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+// 
+//
+// This program is designed to handle bed file, inspired by liheng's bedidx.c
+//
 #ifndef BEDUTILS_H
 #define BEDUTILS_H
 #include <stdint.h>
@@ -12,8 +32,8 @@
 
 typedef struct
   {
-  int m;
-  int n;
+  int m; // used-length
+  int n; // alloced-length
   int flag;
   uint64_t *a;
   int *idx;
@@ -30,8 +50,22 @@ chromosome_t;
 
 KHASH_MAP_INIT_STR(reg, bedreglist_t)
 KHASH_MAP_INIT_STR(chr, chromosome_t)
+
 typedef kh_reg_t regHash_t;
 typedef kh_chr_t chrHash_t;
+
+typedef struct
+  {
+  int is_empty;
+  regHash_t *reg;
+  chrHash_t *chr;
+  char **seq_names; // chromosome names
+  int n_seq; // number of names
+  uint32_t region; // region count
+  uint32_t length; // region length
+  uint32_t total;
+  }
+bedaux_t;
 
 typedef struct
   {

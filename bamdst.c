@@ -438,13 +438,15 @@ KSORT_INIT_GENERIC(uint32_t)
 
 static float median_cal(const uint32_t * array, int l)
   {
-  if (isNull(l)) return 0;
+  if (l == 0) return 0;
+  if (l == 1) return (float)array[0];
+  if (l == 2) return (float)(array[0] + array[1]) / 2;
   uint32_t *tmp;
   tmp = (uint32_t*)needmem(l *sizeof(uint32_t));
   memcpy(tmp, array, l * sizeof(uint32_t));
   ks_introsort(uint32_t, l, tmp);
   float med = l & 1 ? tmp[(l >> 1) + 1] :
-    (tmp[l >> 1] + tmp[(l >> 1) - 1]) / 2.0;
+    (float)(tmp[l >> 1] + tmp[(l >> 1) - 1]) / 2;
   mustfree(tmp);
   return med;
   }
@@ -735,7 +737,7 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
   //ksprintf(para->pdepths,"\n");
   count_increase(a->c_reg, (int)avg, uint32_t);
   ksprintf(para->rcov,"%s\t%u\t%u\t%.2f\t%.1f\t%.2f\t%.2f\n",
-	   para->name, node->start, node->stop, avg, med, cov1, cov2);
+	   para->name, node->start-1, node->stop, avg, med, cov1, cov2);
   if (para->pdepths->l > WINDOW_SIZE) write_buffer_bgzf(para->pdepths, para->fdep);
   if (para->rcov->l > WINDOW_SIZE) write_buffer_bgzf(para->rcov, para->freg);
   return 1;

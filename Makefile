@@ -1,11 +1,11 @@
 CC=			gcc
-CFLAGS=		-g -Wall -O2
+CFLAGS=		-g -Wall -O2 
 DFLAGS=		-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE
 LOBJS=		bgzf.o kstring.o bam_aux.o bam.o bam_import.o bam_index.o sam_header.o bedutil.o commons.o
 PROG=		bamdst bedutils
 INCLUDES=	-Isamlib/ -I.
 SUBDIRS=	. samlib
-LIBPATH=        -L.
+LIBPATH=        -L. 
 
 .SUFFIXES:.c .o
 .PHONY: all
@@ -23,7 +23,7 @@ libbam.a:$(LOBJS)
 		$(AR) -csru $@ $(LOBJS)
 
 bamdst:lib $(AOBJS) samlib/bam.h
-		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm -lz -lbam
+		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm -lbam -lz
 
 bedutils: $(AOBJS) bedutil.h
 		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bedtk.c $(LIBPATH) $(INCLUDES) -lbam -lz
