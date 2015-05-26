@@ -1136,7 +1136,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] forward strand reads", fs->n_pstrand); 
     fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] backward strand reads", fs->n_mstrand); 
     fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] PCR duplicate reads", fs->n_dup); 
-    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of PCR duplicate reads", (float)fs->n_dup / fs->n_reads *100); 
+    fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of PCR duplicate reads", (float)fs->n_dup / fs->n_mapped *100); // change n_reads to n_mapped, 2015/05/25
     fprintf(fc, "%60s\t%d\n", "[Total] Map quality cutoff value", f->mapQ_lim); 
     fprintf(fc, "%60s\t%"PRIu64"\n", "[Total] MapQuality above cutoff reads", fs->n_qual); 
     fprintf(fc, "%60s\t%.2f%%\n", "[Total] Fraction of MapQ reads in all reads", (float)fs->n_qual / fs->n_reads * 100); 
