@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.1";
+static char const *Version = "1.0.2";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
