@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.2";
+static char const *Version = "1.0.3";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -352,17 +352,17 @@ typedef struct bamflag
      {									\
      ++(s)->n_mapped;							\
      (s)->n_mdata += (c)->l_qseq;					\
-     }									\
-   if ((c)->flag & BAM_FDUP)						\
+     if ((c)->flag & BAM_FREVERSE) ++(s)->n_mstrand;			\
+     else ++(s)->n_pstrand;						\
+     if ((c)->flag & BAM_FDUP)						\
      {									\
-     ++(s)->n_dup;							\
-     ret = 2;								\
+	 ++(s)->n_dup;							\
+	 ret = 2;							\
      }									\
-   if ((c)->flag & BAM_FSECONDARY) ret = 3;				\
-   if ((c)->flag & BAM_FREVERSE) ++(s)->n_mstrand;			\
-   else ++(s)->n_pstrand;						\
+     if ((c)->flag & BAM_FSECONDARY) ret = 3;				\
+     }									\
    }									\
- } while(0)
+} while(0)
 
 static void emit_try_help(void)
   {
@@ -1306,6 +1306,7 @@ int bamdst(int argc, char *argv[])
       }
     aux->ndata = n;
     }
+  // FIXME: accpet more than one bam files!
   if (export_target_bam)
     {
     bamoutfp = bam_open(export_target_bam, "w");
