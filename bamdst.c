@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.3";
+static char const *Version = "1.0.4";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -322,6 +322,17 @@ typedef struct bamflag
   uint64_t n_trmdat; // target rmdup data
   } bamflag_t;
 
+
+/*
+ *  flag:
+ *      0  qc failed
+ *      1  clean read
+ *      2  duplicate
+ *      3  secondary alignment
+ *      -1 normal end
+ *      -2 trancate
+ *      -3 unmap
+ */
 // use this macro to stat the flags 
 #define flagstat(s, c, ret) do {					\
  ++(s)->n_reads;							\
@@ -361,6 +372,9 @@ typedef struct bamflag
      }									\
      if ((c)->flag & BAM_FSECONDARY) ret = 3;				\
      }									\
+   else	{								\
+       ret = -3;							\
+   }									\
    }									\
 } while(0)
 
@@ -840,6 +854,8 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
       bam1_core_t *c = &b->core;
       flagstat(fs, c, ret);
       if (c->qual > f->mapQ_lim) fs->n_qual++;
+      if (c->tid == -1 || ret == -3) goto endcore; // unmapped~
+      
       if (ret > 1)
 	{
 	state = CDUP;
@@ -849,7 +865,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	if (c->flag & BAM_FREAD1) fs->n_rmdup1++;
 	if (c->flag & BAM_FREAD2) fs->n_rmdup2++;
 	}
-      if (c->tid == -1) goto endcore; // unmapped~
+
 
       /* stat the insertsize */
       if (c->isize > 0 && c->isize < f->isize_lim)
