@@ -51,12 +51,18 @@ count64_t;
 
 #define count32_init(c)	do {			\
  (c) = (count32_t *)malloc(sizeof(count32_t));	\
- (c)->m = (c)->n = 0;				\
+ (c)->m = 0;					\
+ (c)->n = 2;					\
+ (c)->a = malloc(sizeof(uint32_t)*2);		\
+ memset((c)->a, 0, (c)->n *sizeof(uint32_t));	\
  } while(0)
 
 #define count64_init(c)	do {			\
  (c) = (count64_t*)malloc(sizeof(count64_t));	\
- (c)->m = (c)->n = 0;				\
+ (c)->m = 0;					\
+ (c)->n = 2;					\
+ (c)->a = malloc(sizeof(uint64_t)*2);		\
+ memset((c)->a, 0, (c)->n *sizeof(uint64_t));	\
  } while(0)
 
 #define count_destroy(c) { free((c)->a); free(c); }
@@ -76,12 +82,6 @@ count64_t;
      (c)->n = (c)->m << 1;					\
      (c)->a = realloc((c)->a, sizeof(type) * (c)->n);		\
      memset((c)->a + (c)->m, 0, ((c)->n-(c)->m)*sizeof(type));	\
-     }								\
-   else								\
-     {								\
-     (c)->n = 2;						\
-     (c)->a = malloc(sizeof(type)*2);				\
-     memset((c)->a, 0, (c)->n *sizeof(type));			\
      }								\
    }								\
  if((c)->n <= d+1)						\

@@ -162,7 +162,7 @@ static void bed_destroy(regHash_t *reghash, bedvoid_destroy func)
       bedreglist_t *bed = &kh_val(reghash, k);
       freemem(bed->a);
       freemem(bed->idx);
-      func(bed->data);
+      if (bed->data) func(bed->data);
       freemem((char*)kh_key(reghash, k));
       kh_del(reg, reghash, k);
       //freemem(bed);

@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.4";
+static char const *Version = "1.0.5";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -169,7 +169,7 @@ static const char * init_debugmsg[] =
 // debug macro, I think it is a good way to find memeory problem
 #define INIT_DEBUG(x) do {						\
  int _a = x;								\
- if(_a)									\
+ if(_a > 0 && _a < 3)							\
    {									\
    warnings("%s : %d %s",__FILE__, __LINE__, init_debugmsg[_a]);	\
    }									\
@@ -299,11 +299,11 @@ void aux_destroy(struct _aux *a)
   bedHand->destroy((void *)a->h_tgt, destroy_data);
   bedHand->destroy((void *)a->h_flk, destroy_void);
   bam_header_destroy(a->h);
-  count_destroy(a->c_dep);
-  count_destroy(a->c_rmdupdep);
-  count_destroy(a->c_flkdep);
-  count_destroy(a->c_isize);
-  count_destroy(a->c_reg);
+  if (a->c_dep->n > 0) count_destroy(a->c_dep);
+  if (a->c_rmdupdep->n > 0) count_destroy(a->c_rmdupdep);
+  if (a->c_flkdep->n > 0) count_destroy(a->c_flkdep);
+  if (a->c_isize->n > 0) count_destroy(a->c_isize);
+  if (a->c_reg->n > 0) count_destroy(a->c_reg);
   free(a);
   }
 
@@ -666,8 +666,15 @@ loopbams_parameters_t * init_loopbams_parameters()
   }
 
 int close_loopbam_parameters(loopbams_parameters_t *para)
-  {
-  if (para->tgt_node) errabort("[close loopbam] target node is still reachable");
+{
+    if (para->tgt_node) {
+	while(para->tgt_node)
+	{
+	    debug("length: %d\tstart:%u\tend:%u\n", para->tgt_node->len, para->tgt_node->start, para->tgt_node->stop);
+	    para->tgt_node = para->tgt_node->next;
+	}
+	errabort("[close loopbam] target node is still reachable");
+    }
   if (para->flk_node) errabort("[close loopbam] flank node is still reachable");
   freemem(para->pdepths->s);
   freemem(para->rcov->s);
@@ -969,6 +976,16 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
       }
     bgzf_close(a->data[i]);
     }
+  while (para->tgt_node)
+  {
+      stat_each_region(para, a);
+      del_node(para->tgt_node); // no need allocate memory for these nodes
+  }
+  while(para->flk_node)
+  {
+      count_increaseN(a->c_flkdep, 0, para->flk_node->len, uint32_t);
+      del_node(para->flk_node); // no need allocate memory for these nodes
+  }
   check_reachable_regions(para, a);
   write_unover_file();
   write_buffer_bgzf(para->pdepths, para->fdep);
