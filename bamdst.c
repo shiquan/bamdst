@@ -57,7 +57,7 @@ static bool zero_based = TRUE;
 
 /* The number of threads after which there are 
    diminishing performance gains. */
-enum { DEFAULT_MAX_THREADS = 8 };
+//enum { DEFAULT_MAX_THREADS = 8 };
 
 /* duplicate will be removed if rmdup_mark is TRUE 
  * this option is removed since version 1.0.0
@@ -75,7 +75,7 @@ int check_filename_isbam(char *name)
   return 0;
   }
 
-static const int WINDOW_SIZE = 64 * 1024;
+static const int WINDOW_SIZE = 102400;
 // force replace the existed files
 //static bool is_forced = TRUE;
 
@@ -215,7 +215,7 @@ static struct depnode *
 bed_depnode_list(bedreglist_t *bed)
   {
   struct depnode *node;
-  struct depnode *header = NULL;;
+  struct depnode *header = NULL;
   struct depnode *tmpnode = NULL;
   int i;
   for ( i = 0; i < bed->m; ++i)
@@ -691,9 +691,10 @@ int write_buffer_bgzf(kstring_t *str, BGZF *fp)
   int write_size;
   if (str->l)
     {
-    write_size = bgzf_write(fp, str->s, str->l);
-    str->l = 0;
-    return write_size;
+	bgzf_flush_try(fp, str->l);
+	write_size = bgzf_write(fp, str->s, str->l);
+	str->l = 0;
+	return write_size;
     }
   return 0;
   }
@@ -745,12 +746,16 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
       push_bedreg(para->ucreg, lst_start, lst_stop);
       //fprintf(stderr, "%u\t%u\n", lst_start, lst_stop);
       }
+    write_buffer_bgzf(para->pdepths, para->fdep);
     }
   else
     {
     avg = med = cov1 = cov2 = 0.0;
     for (j = 0; j < node->len; ++j)
-      ksprintf(para->pdepths, "%s\t%d\t0\t0\t0\n", para->name, node->start+j);
+    {
+	ksprintf(para->pdepths, "%s\t%d\t0\t0\t0\n", para->name, node->start+j);
+	write_buffer_bgzf(para->pdepths, para->fdep);
+    }
     push_bedreg(para->ucreg, node->start, node->stop); // store uncover region
     count_increaseN(para->depvals_of_chr, 0, node->len, uint32_t);
     count_increaseN(a->c_dep, 0, node->len, uint32_t);
@@ -759,8 +764,9 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
   count_increase(a->c_reg, (int)avg, uint32_t);
   ksprintf(para->rcov,"%s\t%u\t%u\t%.2f\t%.1f\t%.2f\t%.2f\n",
 	   para->name, node->start-1, node->stop, avg, med, cov1, cov2);
-  if (para->pdepths->l > WINDOW_SIZE) write_buffer_bgzf(para->pdepths, para->fdep);
-  if (para->rcov->l > WINDOW_SIZE) write_buffer_bgzf(para->rcov, para->freg);
+
+  //if (para->rcov->l > WINDOW_SIZE)
+  write_buffer_bgzf(para->rcov, para->freg);
   return 1;
   }
 

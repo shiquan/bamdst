@@ -1,8 +1,8 @@
-CC=			gcc
+CC=		gcc
 CFLAGS=		-g -Wall -O2 
-DFLAGS=		-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE
+DFLAGS=		-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DBGZF_CACHE
 LOBJS=		bgzf.o kstring.o bam_aux.o bam.o bam_import.o bam_index.o sam_header.o bedutil.o commons.o
-PROG=		bamdst bedutils
+PROG=		bamdst
 INCLUDES=	-Isamlib/ -I.
 SUBDIRS=	. samlib
 LIBPATH=        -L. 
@@ -25,11 +25,8 @@ libbam.a:$(LOBJS)
 bamdst:lib $(AOBJS) samlib/bam.h
 		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm -lbam -lz
 
-bedutils: $(AOBJS) bedutil.h
-		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bedtk.c $(LIBPATH) $(INCLUDES) -lbam -lz
-
 bgzf.o:bgzf.c bgzf.h
-		$(CC) -c $(CFLAGS) $(DFLAGS) -DBGZF_CACHE $(INCLUDES) bgzf.c -o $@
+		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bgzf.c -o $@
 
 kstring.o:kstring.c kstring.h
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) kstring.c -o $@
