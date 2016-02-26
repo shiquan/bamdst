@@ -58,7 +58,7 @@ value for reasonal visual purpose. Default is 2000.
 
 set this cutoff value for calculate the bad covered region. Default is <5.
 
---use_rmdup
+--use_rmdup (an invalid parament since v1.0.0 )
 
 Use rmdup depth instead of cover depth to calculate the coverage of target regions and
 
