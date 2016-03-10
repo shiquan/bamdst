@@ -417,7 +417,7 @@ Optional parameters:\n\
     /*-d, --rmdup         remove dup reads when calculate depth\n	\*/
       puts ("\
 * Five essential files would be created in the output dir. \n\
-* exon.tsv.gz and depth.tsv.gz are zipped by bgzip, so you can use tabix \n\
+* region.tsv.gz and depth.tsv.gz are zipped by bgzip, so you can use tabix \n\
   index these files.\n\n\
  - coverage.report     a report of the coverage information and reads \n\
                        information of whole target regions\n\
