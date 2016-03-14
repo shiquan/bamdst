@@ -92,9 +92,9 @@ flank region, and reads stat information of the input file(s).
 
 Here is the full details of each entry.
 
-     [Total] Raw Reads (All reads)  // All reads in the bam file(s).
-     [Total] QC Fail reads // Reads number failed QC, this flag is marked by other software,like bwa. See flag in the bam structure.
-     [Total] Raw Data(Mb) // Total reads data in the bam file(s).
+        [Total] Raw Reads (All reads)  // All reads in the bam file(s).
+        [Total] QC Fail reads // Reads number failed QC, this flag is marked by other software,like bwa. See flag in the bam structure.
+        [Total] Raw Data(Mb) // Total reads data in the bam file(s).
     	[Total] Paired Reads // Paired reads numbers.
 	[Total] Mapped Reads // Mapped reads numbers.
 	[Total] Fraction of Mapped Reads // Ratio of mapped reads against raw reads.
