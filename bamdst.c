@@ -1343,7 +1343,7 @@ int bamdst(int argc, char *argv[])
   freeall:
     freemem(export_target_bam);
     freemem(outdir);
-    return 1;
+    return EXIT_SUCCESS;
 }
 
 /* main */
