@@ -519,7 +519,7 @@ int load_bed_init(char const *fn, aux_t * a)
 
     mustfree(inf1);
     mustfree(inf2);
-    return 1;
+    return 0;
 }
 
 // this function used to add an region to the bedregion struct
@@ -537,7 +537,7 @@ int push_bedreg(bedreglist_t *bed, uint32_t begin, uint32_t end)
 	bed->a = (uint64_t*)enlarge_empty_mem((void*)bed->a, bed->m * sizeof(uint64_t), bed->n *sizeof(uint64_t));
     }
     bed->a[bed->m++] = (uint64_t)begin << 32 | (uint32_t)end;
-    return 1;
+    return 0;
 }
 
 typedef enum
@@ -681,7 +681,7 @@ int close_loopbam_parameters(loopbams_parameters_t *para)
     bgzf_close(para->fdep);
     bgzf_close(para->freg);
     mustfree(para);
-    return 1;
+    return 0;
 }
 
 int write_buffer_bgzf(kstring_t *str, BGZF *fp)
@@ -754,7 +754,7 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
 
     //if (para->rcov->l > WINDOW_SIZE)
     write_buffer_bgzf(para->rcov, para->freg);
-    return 1;
+    return 0;
 }
 
 // if bam files not contained all chromosomes in the bed file
@@ -795,7 +795,7 @@ int check_reachable_regions(loopbams_parameters_t *para, aux_t *a)
 	    }
 	}
     }
-    return 1;
+    return 0;
 }
 
 int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
@@ -806,7 +806,7 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
 	count_increase(a->c_flkdep, node->vals[j], uint32_t);
     del_node(para->flk_node);
     depnode_init(para->flk_node);
-    return 1;
+    return 0;
 }
 
 void write_unover_file()
@@ -972,7 +972,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     write_buffer_bgzf(para->pdepths, para->fdep);
     write_buffer_bgzf(para->rcov, para->freg);
     close_loopbam_parameters(para);
-    return 1;
+    return 0;
 }
  
 struct regcov
@@ -1206,7 +1206,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	mustfree(regcov);
 	mustfree(flkcov);
 	fclose(fc);
-	return 1;
+	return 0;
 }
 
 enum
@@ -1343,7 +1343,7 @@ int bamdst(int argc, char *argv[])
   freeall:
     freemem(export_target_bam);
     freemem(outdir);
-    return EXIT_SUCCESS;
+    return 0;
 }
 
 /* main */
