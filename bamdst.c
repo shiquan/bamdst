@@ -23,7 +23,7 @@
    SOFTWARE.
 */
 
-/* Contact: Quan Shi (shiquan@genomics.cn) */
+/* Author: Quan Shi (shiquan@genomics.cn) */
 
 #include "commons.h"
 #include "count.h"
@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.6";
+static char const *Version = "1.0.7";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */

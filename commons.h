@@ -1,5 +1,4 @@
-/* The MIT License
-
+/*
    Copyright (c) 2013-2014 Beijing Genomics Institution (BGI)
 
    Permission is hereby granted, free of charge, to any person obtaining
@@ -94,13 +93,12 @@ void *needmem(size_t size);
 void freemem(void *pt);
 void mustfree(void *pt);
 
-#define mustfree(pt) do {												\
- if (isNull(pt))														\
-	 {																	\
-	 errabort("%s : %d Trying to free an empty point!", __FILE__, __LINE__); \
-	 }																	\
- free(pt);																\
- } while(0)
+#define mustfree(pt) do {                                               \
+        if (isNull(pt)) {                                               \
+            errabort("%s : %d Trying to free an empty point!", __FILE__, __LINE__); \
+        }                                                               \
+        free(pt);                                                       \
+    } while(0)
 
 void *needlargemem(size_t size);
 void *resizemem(void *vp, size_t size);
@@ -108,12 +106,11 @@ void *resizelargemem(void *vp, size_t size);
 void *enlarge_empty_mem(void *vp, size_t old_size, size_t new_size);
 void *enlarge_empty_largemem(void *vp, size_t old_size, size_t new_size);
 
-#define errassert(assertion, ...)  do {			\
- if (assertion)									\
-	 {											\
-	 fprintf(stderr, __VA_ARGS__);				\
-	 fprintf(stderr, "\n");						\
-	 assert(0);									\
-	 } while(0)
+#define errassert(assertion, ...)  do {                                 \
+        if (assertion) {                                                \
+            fprintf(stderr, __VA_ARGS__);				\
+            fprintf(stderr, "\n");                                      \
+            assert(0);                                                  \
+        } while(0)
 
 #endif
