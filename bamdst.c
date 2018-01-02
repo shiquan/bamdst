@@ -852,7 +852,9 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	    flagstat(fs, c, ret);
 	    if (c->qual > f->mapQ_lim) fs->n_qual++;
 	    if (c->tid == -1 || ret == -3) goto endcore; // unmapped~
-      
+            // secondary alignment
+            if ( ret == 3 ) goto endcore;
+            
 	    if (ret > 1) {
 		state = CDUP;
 	    } else {
