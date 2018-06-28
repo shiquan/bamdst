@@ -1186,6 +1186,14 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 10x", regcov->cov10);
 	    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 30x", regcov->cov30);
 	    fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 100x", regcov->cov100);
+            if (f->cutoff)
+	    {
+		char titles[60];
+                sprintf(titles,"[Target] Fraction Region covered (>=%ux)", f->cutoff);
+		fprintf(fc, "%60s\t%.2f%%\n", titles, regcov->covx);
+	    }
+	    //tgt regions
+
 	    //flk
 	    fprintf(fc, "%60s\t%u\n", "[flank] flank size", flank_reg);
 	    fprintf(fc, "%60s\t%"PRIu64"\n", "[flank] Len of region (not include target region)", a->flk_len);
@@ -1201,6 +1209,13 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=10x)", flkcov->cov10);
 	    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=30x)", flkcov->cov30);
 	    fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=100x)", flkcov->cov100);
+            if (f->cutoff)
+            {
+		char titles[40];
+                sprintf(titles,"[flank] Coverage (>=%ux)", f->cutoff);
+		fprintf(fc, "%60s\t%.2f%%\n", titles, flkcov->covx);
+	    }
+
 	}
 	while(0);
   
