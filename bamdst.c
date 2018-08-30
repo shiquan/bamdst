@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.7";
+static char const *Version = "1.0.8";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -403,7 +403,7 @@ Option -o and -p are mandatory:\n\
 	puts ("\
 Optional parameters:\n\
    -f, --flank [200]   flank n bp of each region\n\
-   -q [20]             map quality cutoff value\n\
+   -q [20]             map quality cutoff value, greater or equal to the value will be count\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
    --cutoffdepth [0]   list the coverage of above depths\n\
    --isize [2000]      stat the inferred insert size under this value\n\
@@ -545,6 +545,7 @@ typedef enum
 	CMATCH,
 	CDEL,
 	CDUP,
+        CLOWQ, // low quality, bug report by TOM MORRIS 
 	UNKNOWN
     } cntstat_t;
 
@@ -850,12 +851,18 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	    }
 	    bam1_core_t *c = &b->core;
 	    flagstat(fs, c, ret);
-	    if (c->qual > f->mapQ_lim) fs->n_qual++;
+
+            // People usually want to know how many aligned reads with mapping quality greater than or equally to 10 or 20..
+	    //if (c->qual > f->mapQ_lim) fs->n_qual++;            
+            if (c->qual >= f->mapQ_lim) fs->n_qual++;
+            else state = CLOWQ; 
+            
 	    if (c->tid == -1 || ret == -3) goto endcore; // unmapped~
             // secondary alignment
             if ( ret == 3 ) goto endcore;
             
-	    if (ret == 2 || !(c->qual > f->mapQ_lim) ) {
+
+	    if (ret == 2) {
 		state = CDUP;
 	    } else {
 		if (c->flag & BAM_FREAD1) fs->n_rmdup1++;
