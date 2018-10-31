@@ -115,6 +115,8 @@ typedef struct {
 #define BAM_FQCFAIL      512
 /*! @abstract optical or PCR duplicate */
 #define BAM_FDUP        1024
+// updated 20181031
+#define BAM_FSUPPLEMENTARY 2048
 
 #define BAM_OFDEC          0
 #define BAM_OFHEX          1

@@ -40,7 +40,7 @@
 #include "bgzf.h" // write tabix-able depth.gz file
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.8";
+static char const *Version = "1.0.9";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -340,13 +340,16 @@ typedef struct bamflag
 	    ++(s)->n_qcfail;						\
 	    ret = 0;							\
 	}								\
+        else if ( (c)->flag & BAM_FSECONDARY || (c)->flag & BAM_FSUPPLEMENTARY) {\
+            ret = 3;\
+        }\
 	else								\
 	{								\
 	    ret = 1;							\
 	    if ((c)->flag & BAM_FPAIRED)				\
 	    {								\
 		++(s)->n_pair_all;					\
-		if ((c)->flag & BAM_FPROPER_PAIR) ++(s)->n_pair_good;	\
+		if (((c)->flag & BAM_FPROPER_PAIR) && !((c)->flag & BAM_FUNMAP)) ++(s)->n_pair_good; \
 		if ((c)->flag & BAM_FREAD1) ++(s)->n_read1;		\
 		if ((c)->flag & BAM_FREAD2) ++(s)->n_read2;		\
 		if (((c)->flag & BAM_FMUNMAP) && !((c)->flag & BAM_FUNMAP)) \
@@ -368,9 +371,8 @@ typedef struct bamflag
 		    ++(s)->n_dup;					\
 		    ret = 2;						\
 		}							\
-		if ((c)->flag & BAM_FSECONDARY) ret = 3;		\
 	    }								\
-	    else	{						\
+	    else {                                                      \
 		ret = -3;						\
 	    }								\
 	}								\
