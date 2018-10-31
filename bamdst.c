@@ -863,6 +863,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
             // secondary alignment
             if ( ret == 3 ) goto endcore;
             
+
 	    if (ret == 2) {
 		state = CDUP;
 	    } else {
