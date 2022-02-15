@@ -340,9 +340,6 @@ typedef struct bamflag
 	    ++(s)->n_qcfail;						\
 	    ret = 0;							\
 	}								\
-        else if ( (c)->flag & BAM_FSECONDARY || (c)->flag & BAM_FSUPPLEMENTARY) {\
-            ret = 3;\
-        }\
 	else								\
 	{								\
 	    ret = 1;							\
@@ -852,6 +849,9 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 		errabort("%d bam file is truncated!\n", i + 1);
 	    }
 	    bam1_core_t *c = &b->core;
+            // skip secondary and supplement alignment first
+            if (c->flag & BAM_FSECONDARY || c->flag & BAM_FSUPPLEMENTARY) continue;
+            
 	    flagstat(fs, c, ret);
 
             // People usually want to know how many aligned reads with mapping quality greater than or equally to 10 or 20..
@@ -860,10 +860,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
             else state = CLOWQ; 
             
 	    if (c->tid == -1 || ret == -3) goto endcore; // unmapped~
-            // secondary alignment
-            if ( ret == 3 ) goto endcore;
             
-
 	    if (ret == 2) {
 		state = CDUP;
 	    } else {
