@@ -152,9 +152,11 @@ static size_t maxalloc =
 void *needmem(size_t size)
   {
   void *pt;
-  if (isZero(size) || size > NEEDMEM_LIMIT)
-    errabort("[NeedMEM] trying to allocate %llu bytes (limits: %llu)",
-	     (unsigned long long)size, NEEDMEM_LIMIT);
+  
+  // if (isZero(size) || size > NEEDMEM_LIMIT)
+  if (size == 0)
+      errabort("[NeedMEM] trying to allocate zero bytes.");
+
   if (isNull(pt = malloc(size)))
     errabort("[needMem] Out of memory - request size %llu bytes : %s",
 	     (unsigned long long)size, strerror(errno));
