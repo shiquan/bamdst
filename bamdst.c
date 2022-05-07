@@ -297,11 +297,17 @@ void aux_destroy(struct _aux *a)
     bedHand->destroy((void *)a->h_tgt, destroy_data);
     bedHand->destroy((void *)a->h_flk, destroy_void);
     bam_header_destroy(a->h);
-    if (a->c_dep->n > 0) count_destroy(a->c_dep);
-    if (a->c_rmdupdep->n > 0) count_destroy(a->c_rmdupdep);
-    if (a->c_flkdep->n > 0) count_destroy(a->c_flkdep);
-    if (a->c_isize->n > 0) count_destroy(a->c_isize);
-    if (a->c_reg->n > 0) count_destroy(a->c_reg);
+    /* if (a->c_dep->n > 0) count_destroy(a->c_dep); */
+    /* if (a->c_rmdupdep->n > 0) count_destroy(a->c_rmdupdep); */
+    /* if (a->c_flkdep->n > 0) count_destroy(a->c_flkdep); */
+    /* if (a->c_isize->n > 0) count_destroy(a->c_isize); */
+    /* if (a->c_reg->n > 0) count_destroy(a->c_reg); */
+    count_destroy(a->c_dep);
+    count_destroy(a->c_rmdupdep);
+    count_destroy(a->c_flkdep);
+    count_destroy(a->c_isize);
+    count_destroy(a->c_reg);
+
     free(a);
 }
 
@@ -512,7 +518,7 @@ int load_bed_init(char const *fn, aux_t * a)
     if (!zero_based) bedHand->base1to0(a->h_flk);
     bedHand->merge(a->h_flk);
     bedHand->check_length(a->h_tgt, h_chrlen); // warp the length accord to the chromosome length
-    bedHand->diff(a->h_flk, a->h_tgt);
+    //bedHand->diff(a->h_flk, a->h_tgt);
     inf_t *inf2 = bedHand->stat(a->h_flk);
     a->flk_len = inf2->length;
 
@@ -815,7 +821,7 @@ void write_unover_file()
     bedHand->merge(h_uncov);
     bedHand->base1to0(h_uncov);
     bedHand->save("uncover.bed", h_uncov);
-    bedHand->destroy(h_uncov, destroy_void);
+    bedHand->destroy(h_uncov, destroy_data);
 }
 
 // load bam files and stat the depths
@@ -1124,6 +1130,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 			if (f->cutoff) fprintf(fchrcov, "\t%5.4f", (float)0);
 		    }
 		    fprintf(fchrcov, "\n");
+                    free(chrcov);
 		}
 	    }
 	}
@@ -1320,7 +1327,7 @@ int bamdst(int argc, char *argv[])
 	for (i = 0; i < n; ++i)
 	{
 	    bam_header_t *h_tmp;
-	    h_tmp = calloc(1, sizeof(bam_header_t));
+	    //h_tmp = calloc(1, sizeof(bam_header_t));
 	    if ( STREQ(argv[optind + i], "-") )
 	    {
 		aux->data[i] = bgzf_dopen(fileno(stdin), "r");
@@ -1352,9 +1359,11 @@ int bamdst(int argc, char *argv[])
     load_bed_init(probe, aux);
     chrhash_destroy();
     freemem(probe);
-    aux->c_isize->a = calloc(opt.isize_lim, sizeof(unsigned));
+    if (aux->c_isize->n < opt.isize_lim) {
+        aux->c_isize->a = realloc(aux->c_isize->a, opt.isize_lim*sizeof(unsigned));
+    }
     for (i = 0; i < opt.isize_lim; ++i) aux->c_isize->a[i] = 0;
-    aux->c_isize->n = opt.isize_lim;
+    aux->c_isize->m = opt.isize_lim;
     aux->nchr = aux->h->n_targets;
     struct bamflag fs = {};
     load_bamfiles(&opt, aux, &fs);

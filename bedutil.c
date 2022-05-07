@@ -96,6 +96,7 @@ bed_read(const char *fn, regHash_t * reghash, int add1, int add2, int *ret)
       k = kh_put(reg, reghash, strdup(str->s), &ret);
       bedreglist_t *b;
       b = (bedreglist_t*)needmem(sizeof(bedreglist_t));
+      memset(b, 0, sizeof(bedreglist_t));
       kh_val(reghash, k) = *b;
       }
     bedreglist_t *p = &kh_val(reghash, k);
@@ -163,8 +164,9 @@ static void bed_destroy(regHash_t *reghash, bedvoid_destroy func)
       freemem(bed->a);
       freemem(bed->idx);
       if (bed->data) func(bed->data);
-      freemem((char*)kh_key(reghash, k));
+      char *key = (char*)kh_key(reghash, k);
       kh_del(reg, reghash, k);
+      free(key);
       //freemem(bed);
       }
     }
@@ -323,6 +325,9 @@ static bedreglist_t * regcore_diff(bedreglist_t * bed1, bedreglist_t * bed2)
   bedreglist_t * uniq = regcore_uniq(bed1, bed2);
   regcore_merge(uniq);
   bedreglist_t * reg = bed_directadd(bed1, uniq);
+  free(uniq->a);
+  free(uniq->idx);
+  free(uniq);
   sort_reg(reg);
   uint64_t *b;
   b = (uint64_t*)needmem((reg->m+1) * sizeof(uint64_t));
