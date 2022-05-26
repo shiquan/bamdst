@@ -1252,7 +1252,7 @@ enum
 static struct option const long_opts[] =
     {
 	{"outdir", required_argument, NULL, 'o'},
-	{"bedfile", required_argument, NULL, 'p'},
+	{"bed", required_argument, NULL, 'p'},
 	{"flank", required_argument, NULL, 'f'},
 	{"maxdepth", required_argument, NULL, MAXDEPTH},
 	{"cutoffdepth", required_argument, NULL, CUTOFF},
