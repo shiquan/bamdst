@@ -208,6 +208,3 @@ input bam file(s) against the probe file. Set the cutoff value of
 
 uncover by parameter "--uncover"
 
-# Known bugs
-
-For a large region, like whole genome region, bamdst may go crash with a segmental fault. I have noticed issues like this, and this bug can be tolerated by split a large region into several small pieces. However, this bug may not be fixed until next major update.
