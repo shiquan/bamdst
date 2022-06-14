@@ -50,50 +50,47 @@ typedef struct
 count64_t;
 
 #define count32_init(c)	do {			\
- (c) = (count32_t *)malloc(sizeof(count32_t));	\
- (c)->m = 0;					\
- (c)->n = 2;					\
- (c)->a = malloc(sizeof(uint32_t)*2);		\
- memset((c)->a, 0, (c)->n *sizeof(uint32_t));	\
- } while(0)
+        (c) = (count32_t *)malloc(sizeof(count32_t));	\
+        (c)->m = 0;					\
+        (c)->n = 64;					\
+        (c)->a = malloc(sizeof(uint32_t)*(c)->n);       \
+        memset((c)->a, 0, (c)->n *sizeof(uint32_t));	\
+    } while(0)
 
 #define count64_init(c)	do {			\
- (c) = (count64_t*)malloc(sizeof(count64_t));	\
- (c)->m = 0;					\
- (c)->n = 2;					\
- (c)->a = malloc(sizeof(uint64_t)*2);		\
- memset((c)->a, 0, (c)->n *sizeof(uint64_t));	\
- } while(0)
+        (c) = (count64_t*)malloc(sizeof(count64_t));	\
+        (c)->m = 0;					\
+        (c)->n = 64;					\
+        (c)->a = malloc(sizeof(uint64_t)*(c)->n);       \
+        memset((c)->a, 0, (c)->n *sizeof(uint64_t));	\
+    } while(0)
 
 #define count_destroy(c) { free((c)->a); free(c); }
 
 #define count_zero(c) do {			\
- int i;						\
- for (i = 0; i < (c)->n; ++i) (c)->a[i] = 0;	\
- } while(0)
+        int i;                                  \
+        for (i = 0; i < (c)->n; ++i) (c)->a[i] = 0;	\
+    } while(0)
 
 
 // increase c once in postion d
-#define count_increase(c, d, type) do {				\
- if ((c)->n == (c)->m)						\
-   {								\
-   if ((c)->m)							\
-     {								\
-     (c)->n = (c)->m << 1;					\
-     (c)->a = realloc((c)->a, sizeof(type) * (c)->n);		\
-     memset((c)->a + (c)->m, 0, ((c)->n-(c)->m)*sizeof(type));	\
-     }								\
-   }								\
- if((c)->n <= d+1)						\
-   {								\
-   (c)->n = (d+1)<<1;						\
-   (c)->a = realloc((c)->a, sizeof(type) *(c)->n);		\
-   memset((c)->a+(c)->m, 0, ((c)->n - (c)->m)*sizeof(type));	\
-   (c)->m = d+1;						\
-   }								\
- else if((c)->m < d+1) (c)->m = d+1;				\
- (c)->a[d]++;							\
- } while(0)
+#define count_increase(c, d, type) do {                                 \
+        if ((c)->n <= (c)->m)						\
+        {                                                               \
+            (c)->n = (c)->m + 1024;                                     \
+            (c)->a = realloc((c)->a, sizeof(type) * (c)->n);            \
+            memset((c)->a + (c)->m, 0, ((c)->n-(c)->m)*sizeof(type));	\
+        }                                                               \
+        if((c)->n <= d+1)                                               \
+        {                                                               \
+            (c)->n = d+1024;                                            \
+            (c)->a = realloc((c)->a, sizeof(type) *(c)->n);             \
+            memset((c)->a+(c)->m, 0, ((c)->n - (c)->m)*sizeof(type));	\
+            (c)->m = d+1;                                               \
+        }                                                               \
+        else if((c)->m < d+1) (c)->m = d+1;                             \
+        (c)->a[d]++;                                                    \
+    } while(0)
 
 #define count_resize(c, l, type) do {		\
  if((c)->n < l)					\
@@ -106,15 +103,15 @@ count64_t;
  } while(0);
 
 #define count_increaseN(c, d, cnt, type) do {			\
- if((c)->n <= d+1)						\
-   {								\
-   (c)->n = (d+1)<<1;						\
-   (c)->a = realloc((c)->a, sizeof(type) *(c)->n);		\
-   memset((c)->a+(c)->m, 0, ((c)->n - (c)->m)* sizeof(type));	\
-   (c)->m = d+1;						\
-   }								\
- else if((c)->m < d+1) (c)->m = d+1;				\
- (c)->a[d] += cnt;						\
- } while(0)
+        if((c)->n <= d+1)                                       \
+        {                                                       \
+            (c)->n = d+1024;                                    \
+            (c)->a = realloc((c)->a, sizeof(type) *(c)->n);             \
+            memset((c)->a+(c)->m, 0, ((c)->n - (c)->m)* sizeof(type));	\
+            (c)->m = d+1;						\
+        }								\
+        else if((c)->m < d+1) (c)->m = d+1;				\
+        (c)->a[d] += cnt;						\
+    } while(0)
 
 #endif

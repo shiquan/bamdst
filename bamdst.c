@@ -538,7 +538,7 @@ int push_bedreg(bedreglist_t *bed, uint32_t begin, uint32_t end)
     }
     else if (bed->m == bed->n)
     {
-	bed->n = bed->m << 1;
+	bed->n = bed->n+1024;
 	bed->a = (uint64_t*)enlarge_empty_mem((void*)bed->a, bed->m * sizeof(uint64_t), bed->n *sizeof(uint64_t));
     }
     bed->a[bed->m++] = (uint64_t)begin << 32 | (uint32_t)end;
@@ -843,14 +843,15 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	int ret;
 	cntstat_t state;
 	// main loop
+        bam1_t *b;
+        b = (bam1_t*)needmem(sizeof(bam1_t));
+        
 	while (1)
 	{
-	    bam1_t *b;
-	    b = (bam1_t*)needmem(sizeof(bam1_t));
 	    state = CMATCH;
 	    ret = bam_read1(dat, b);
 	    if (ret == -1) {
-		mustfree(b); break; //normal end
+                break; //normal end
 	    } if (ret == -2) {
 		errabort("%d bam file is truncated!\n", i + 1);
 	    }
@@ -865,7 +866,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
             if (c->qual >= f->mapQ_lim) fs->n_qual++;
             else state = CLOWQ; 
             
-	    if (c->tid == -1 || ret == -3) goto endcore; // unmapped~
+	    if (c->tid == -1 || ret == -3) continue; //goto endcore; // unmapped~
             
 	    if (ret == 2) {
 		state = CDUP;
@@ -881,7 +882,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 	    }
 
 	    if (para->tid == c->tid ) {
-		if (goto_next_chromosome) goto endcore;
+		if (goto_next_chromosome) continue; //goto endcore;
 		// Only accepted sorted bam files for effective
 		if (para->lstpos > c->pos) {
 		    errabort("The bam file is not sorted!");
@@ -927,7 +928,8 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 		    para->tgt_node = NULL;
 		    para->flk_node = NULL;
 		    goto_next_chromosome = TRUE;
-		    goto endcore;
+                    continue;
+		    // goto endcore;
 		}
 		para->tar = &kh_val(a->h_tgt, k);
 		para->flk = &kh_val(a->h_flk, k);
@@ -945,7 +947,7 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 
 		/* the next part is init uncover region hash*/
 		k = kh_put(reg, h_uncov, strdup(para->name), &ret);
-
+                
 		bedreglist_t *ucreg_tmp;
 		ucreg_tmp = (bedreglist_t*)needmem(sizeof(bedreglist_t));
 		kh_val(h_uncov, k) = *ucreg_tmp;
@@ -968,9 +970,10 @@ int load_bamfiles(struct opt_aux *f, aux_t * a, bamflag_t * fs)
 		fs->n_tgt++;
 	    }
 
-	  endcore:
-	    bam_destroy1(b);
+            // endcore:
+	    
 	}
+        bam_destroy1(b);
 	bgzf_close(a->data[i]);
     }
     while (para->tgt_node) {
@@ -1070,7 +1073,7 @@ int print_report(struct opt_aux *f, aux_t * a, bamflag_t * fs)
     uint64_t dcnt = 0;
     for (i = 0; i < a->c_isize->m; ++i) icnt += a->c_isize->a[i];
     uint64_t icumu = icnt;
-    for (i = 0; i < a->c_isize->m; ++i)
+    for (i = 0; i < a->c_isize->m && i < f->isize_lim; ++i)
     {
 	icumu -= a->c_isize->a[i];
 	fprintf(finsert, "%d\t%u\t%f\t%"PRIu64"\t%f\n",
@@ -1363,7 +1366,7 @@ int bamdst(int argc, char *argv[])
         aux->c_isize->a = realloc(aux->c_isize->a, opt.isize_lim*sizeof(unsigned));
     }
     for (i = 0; i < opt.isize_lim; ++i) aux->c_isize->a[i] = 0;
-    aux->c_isize->m = opt.isize_lim;
+    //aux->c_isize->m = opt.isize_lim;
     aux->nchr = aux->h->n_targets;
     struct bamflag fs = {};
     load_bamfiles(&opt, aux, &fs);
