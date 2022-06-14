@@ -620,7 +620,7 @@ int readcore(struct depnode *header, bam1_t const * b, cntstat_t state)
 	    s = cigar[i] & 0xf;
 	    l = cigar[i] >> BAM_CIGAR_SHIFT;
 	    if (s == BAM_CDEL) tmp_state = CDEL;
-	    else if (s == BAM_CMATCH) tmp_state = state;
+	    else if (s == BAM_CMATCH || s == BAM_CEQUAL || s == BAM_CDIFF) tmp_state = state;
 	    else continue;
 	    for (j = 0; j < l; ++j)
 	    {
