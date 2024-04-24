@@ -55,6 +55,10 @@ static bool stdin_lock = FALSE;
 /* the bed file is zero based */
 static bool zero_based = TRUE;
 
+/* 定义 max cutoff 最大值为10 */
+
+static const int MAX_CUTOFFS = 10;
+
 /* The number of threads after which there are
    diminishing performance gains. */
 // enum { DEFAULT_MAX_THREADS = 8 };
@@ -142,10 +146,36 @@ struct opt_aux
     int nfiles;
     char **inputs;
     int isize_lim;
-    int cutoff;
+    // int cutoff;
+    bool cutoff;
+    int num_cutoffs;
+    int max_cutoffs; // 最大允许的 cutoff 数量
+    int *cutoffs;    // 指向 cutoff 数组的指针
     int mapQ_lim;
     int maxdepth;
 };
+
+// 一个函数来初始化 opt_aux 结构体
+struct opt_aux init_opt_aux()
+{
+    struct opt_aux opt;
+    memset(&opt, 0, sizeof(opt)); // 初始化所有成员为0
+    opt.num_cutoffs = 0;
+    opt.max_cutoffs = MAX_CUTOFFS; // 设置最大 cutoff 数量
+    opt.cutoff = FALSE;
+    opt.cutoffs = malloc(opt.max_cutoffs * sizeof(int)); // 分配内存
+    if (opt.cutoffs == NULL)
+    {
+        // 处理内存分配失败
+        fprintf(stderr, "Memory allocation failed\n");
+        exit(EXIT_FAILURE);
+    }
+    // 其他成员的初始化...
+    opt.inputs = NULL;
+    opt.isize_lim = 2000;
+    opt.mapQ_lim = 20;
+    return opt;
+}
 
 struct depnode
 {
@@ -425,7 +455,7 @@ Optional parameters:\n\
    -f, --flank [200]   flank n bp of each region\n\
    -q [20]             map quality cutoff value, greater or equal to the value will be count\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
-   --cutoffdepth [0]   list the coverage of above depths\n\
+   --cutoffdepth [0]   list the coverage of above depths, max_cutoffs is 10.\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
    --bamout  BAMFILE   target reads will be exported to this bam file\n\
@@ -1079,8 +1109,11 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 
 struct regcov
 {
-    uint64_t cnt, cnt4, cnt10, cnt30, cnt100, cnt200, cnt300, cnt500, cnt1000, cntx;
-    float cov, cov4, cov10, cov30, cov100, cov200, cov300, cov500, cov1000, covx;
+    uint64_t cnt, cnt4, cnt10, cnt30, cnt100, cnt02x, cnt05x;
+    float cov, cov4, cov10, cov30, cov100, cov02x, cov05x;
+    // MAX_CUTOFFS
+    uint64_t cnt_array[10];
+    float cov_array[10];
 };
 
 struct regcov *regcov_init()
@@ -1100,14 +1133,6 @@ uint64_t cntcov_cal(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint6
     {
         (*data) += cnt->a[i] * i;
         rawcnt += cnt->a[i];
-        if (i < 1000)
-            cov->cnt1000 += cnt->a[i];
-        if (i < 500)
-            cov->cnt500 += cnt->a[i];
-        if (i < 300)
-            cov->cnt300 += cnt->a[i];
-        if (i < 200)
-            cov->cnt200 += cnt->a[i];
         if (i < 100)
             cov->cnt100 += cnt->a[i];
         if (i < 30)
@@ -1116,8 +1141,16 @@ uint64_t cntcov_cal(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint6
             cov->cnt10 += cnt->a[i];
         if (i < 4)
             cov->cnt4 += cnt->a[i];
-        if (f->cutoff && i < f->cutoff)
-            cov->cntx += cnt->a[i];
+        // if (f->cutoff && i < f->cutoff)
+        //     cov->cntx += cnt->a[i];
+        if (f->cutoff)
+        {
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                if (i < f->cutoffs[x])
+                    cov->cnt_array[x] += cnt->a[i];
+            }
+        }
     }
     if (rawcnt == 0)
         return 0;
@@ -1126,23 +1159,96 @@ uint64_t cntcov_cal(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint6
     cov->cnt10 = rawcnt - cov->cnt10;
     cov->cnt30 = rawcnt - cov->cnt30;
     cov->cnt100 = rawcnt - cov->cnt100;
-    cov->cnt200 = rawcnt - cov->cnt200;
-    cov->cnt300 = rawcnt - cov->cnt300;
-    cov->cnt500 = rawcnt - cov->cnt500;
-    cov->cnt1000 = rawcnt - cov->cnt1000;
     cov->cov = (float)cov->cnt / rawcnt * 100;
     cov->cov4 = (float)cov->cnt4 / rawcnt * 100;
     cov->cov10 = (float)cov->cnt10 / rawcnt * 100;
     cov->cov30 = (float)cov->cnt30 / rawcnt * 100;
     cov->cov100 = (float)cov->cnt100 / rawcnt * 100;
-    cov->cov200 = (float)cov->cnt200 / rawcnt * 100;
-    cov->cov300 = (float)cov->cnt300 / rawcnt * 100;
-    cov->cov500 = (float)cov->cnt500 / rawcnt * 100;
-    cov->cov1000 = (float)cov->cnt1000 / rawcnt * 100;
+    // if (f->cutoff)
+    // {
+    //     cov->cntx = rawcnt - cov->cntx;
+    //     cov->covx = (float)cov->cntx / rawcnt * 100;
+    // }
     if (f->cutoff)
     {
-        cov->cntx = rawcnt - cov->cntx;
-        cov->covx = (float)cov->cntx / rawcnt * 100;
+        for (int x = 0; x < f->num_cutoffs; x++)
+        {
+            cov->cnt_array[x] = rawcnt - cov->cnt_array[x];
+            cov->cov_array[x] = (float)cov->cnt_array[x] / rawcnt * 100;
+        }
+    }
+    return rawcnt;
+}
+
+
+uint64_t cntcov_cal2(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint64_t *data, uint64_t tgt_len)
+{
+    uint64_t rawcnt = 0;
+    int i;
+    *data = 0;
+    *cov = (struct regcov){};
+    // average depth
+    for (i = 0; i < cnt->m; ++i)
+    {
+        (*data) += cnt->a[i] * i;
+    }
+    uint64_t avg = (*data) / tgt_len;
+    
+    for (i = 0; i < cnt->m; ++i)
+    {
+        // (*data) += cnt->a[i] * i;
+        rawcnt += cnt->a[i];
+        if (i < 100)
+            cov->cnt100 += cnt->a[i];
+        if (i < 30)
+            cov->cnt30 += cnt->a[i];
+        if (i < 10)
+            cov->cnt10 += cnt->a[i];
+        if (i < 4)
+            cov->cnt4 += cnt->a[i];
+        if (i < (0.2 * avg))
+            cov->cnt02x += cnt->a[i];
+        if (i < (0.5 * avg))
+            cov->cnt05x += cnt->a[i];
+        // if (f->cutoff && i < f->cutoff)
+        //     cov->cntx += cnt->a[i];
+        if (f->cutoff)
+        {
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                if (i < f->cutoffs[x])
+                    cov->cnt_array[x] += cnt->a[i];
+            }
+        }
+    }
+    if (rawcnt == 0)
+        return 0;
+    cov->cnt = rawcnt - (uint64_t)cnt->a[0];
+    cov->cnt4 = rawcnt - cov->cnt4;
+    cov->cnt10 = rawcnt - cov->cnt10;
+    cov->cnt30 = rawcnt - cov->cnt30;
+    cov->cnt100 = rawcnt - cov->cnt100;
+    cov->cnt02x = rawcnt - cov->cnt02x;
+    cov->cov05x = rawcnt - cov->cov05x;
+    cov->cov = (float)cov->cnt / rawcnt * 100;
+    cov->cov4 = (float)cov->cnt4 / rawcnt * 100;
+    cov->cov10 = (float)cov->cnt10 / rawcnt * 100;
+    cov->cov30 = (float)cov->cnt30 / rawcnt * 100;
+    cov->cov100 = (float)cov->cnt100 / rawcnt * 100;
+    cov->cov02x = (float)cov->cnt02x / rawcnt * 100;
+    cov->cov05x = (float)cov->cnt05x / rawcnt * 100;
+    // if (f->cutoff)
+    // {
+    //     cov->cntx = rawcnt - cov->cntx;
+    //     cov->covx = (float)cov->cntx / rawcnt * 100;
+    // }
+    if (f->cutoff)
+    {
+        for (int x = 0; x < f->num_cutoffs; x++)
+        {
+            cov->cnt_array[x] = rawcnt - cov->cnt_array[x];
+            cov->cov_array[x] = (float)cov->cnt_array[x] / rawcnt * 100;
+        }
     }
     return rawcnt;
 }
@@ -1201,7 +1307,8 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     }
     fclose(fdep);
     fclose(finsert);
-    cntcov_cal(f, tarcov, a->c_dep, &fs->n_tdata);
+    // cntcov_cal(f, tarcov, a->c_dep, &fs->n_tdata);
+    cntcov_cal2(f, tarcov, a->c_dep, &fs->n_tdata, a->tgt_len);
     cntcov_cal(f, regcov, a->c_reg, &fs->n_fdata);
     // merge_cnt(a->c_flkdep, a->c_dep);
     cntcov_cal(f, flkcov, a->c_flkdep, &fs->n_fdata);
@@ -1212,8 +1319,15 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     {
         fprintf(fchrcov, "%11s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s", "#Chromosome", "DATA(%)", "Avg depth",
                 "Median", "Coverage%", "Cov 4x %", "Cov 10x %", "Cov 30x %", "Cov 100x %");
+        // if (f->cutoff)
+        //     fprintf(fchrcov, "\tCov %dx", f->cutoff);
         if (f->cutoff)
-            fprintf(fchrcov, "\tCov %dx", f->cutoff);
+        {
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                fprintf(fchrcov, "\tCov %dx", f->cutoffs[x]);
+            }
+        }
         fprintf(fchrcov, "\n");
         khiter_t k;
         for (k = 0; k != kh_end(a->h_tgt); ++k)
@@ -1237,15 +1351,29 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                     per = (float)data / fs->n_tdata * 100.0;
                     fprintf(fchrcov, "%11s\t%8.2f\t%8.2f\t%9.1f\t%8.2f\t%8.2f\t%8.2f\t%8.2f\t%8.2f", name, per, avg,
                             med, chrcov->cov, chrcov->cov4, chrcov->cov10, chrcov->cov30, chrcov->cov100);
+                    // if (f->cutoff)
+                    // fprintf(fchrcov, "\t%.2f", chrcov->covx);
                     if (f->cutoff)
-                        fprintf(fchrcov, "\t%.2f", chrcov->covx);
+                    {
+                        for (int x = 0; x < f->num_cutoffs; x++)
+                        {
+                            fprintf(fchrcov, "\t%.2f", chrcov->cov_array[x]);
+                        }
+                    }
                 }
                 else
                 {
                     fprintf(fchrcov, "%11s\t%8.2f\t%8.2f\t%8.1f\t%8.1f\t%8.1f\t%8.1f\t%8.1f\t%8.1f", name, (float)0,
                             (float)0, (float)0, (float)0, (float)0, (float)0, (float)0, (float)0);
+                    // if (f->cutoff)
+                    //     fprintf(fchrcov, "\t%5.4f", (float)0);
                     if (f->cutoff)
-                        fprintf(fchrcov, "\t%5.4f", (float)0);
+                    {
+                        for (int x = 0; x < f->num_cutoffs; x++)
+                        {
+                            fprintf(fchrcov, "\t%5.4f", (float)0);
+                        }
+                    }
                 }
                 fprintf(fchrcov, "\n");
                 free(chrcov);
@@ -1308,20 +1436,23 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
         fprintf(fc, "%60s\t%" PRIu64 "\n", "[Target] Len of region", a->tgt_len);
         fprintf(fc, "%60s\t%.2f\n", "[Target] Average depth", (float)fs->n_tdata / a->tgt_len);
         fprintf(fc, "%60s\t%.2f\n", "[Target] Average depth(rmdup)", (float)fs->n_trmdat / a->tgt_len);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>0.2*(Average depth)x)", tarcov->cov02x);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>0.5*(Average depth)x)", tarcov->cov05x);
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>0x)", tarcov->cov);
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=4x)", tarcov->cov4);
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=10x)", tarcov->cov10);
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=30x)", tarcov->cov30);
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=100x)", tarcov->cov100);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=200x)", tarcov->cov200);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=300x)", tarcov->cov300);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=500x)", tarcov->cov500);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage (>=1000x)", tarcov->cov1000);
         if (f->cutoff)
         {
             char titles[40];
-            sprintf(titles, "[Target] Coverage (>=%ux)", f->cutoff);
-            fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->covx);
+            // sprintf(titles, "[Target] Coverage (>=%ux)", f->cutoff);
+            // fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->covx);
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                sprintf(titles, "[Target] Coverage (>=%ux)", f->cutoffs[x]);
+                fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->cov_array[x]);
+            }
         }
         // tgt regions
         fprintf(fc, "%60s\t%u\n", "[Target] Target Region Count", a->tgt_nreg);
@@ -1331,15 +1462,16 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 10x", regcov->cov10);
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 30x", regcov->cov30);
         fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 100x", regcov->cov100);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 200x", regcov->cov200);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 300x", regcov->cov300);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 500x", regcov->cov500);
-        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Fraction Region covered >= 1000x", regcov->cov1000);
         if (f->cutoff)
         {
             char titles[60];
-            sprintf(titles, "[Target] Fraction Region covered (>=%ux)", f->cutoff);
-            fprintf(fc, "%60s\t%.2f%%\n", titles, regcov->covx);
+            // sprintf(titles, "[Target] Fraction Region covered (>=%ux)", f->cutoff);
+            // fprintf(fc, "%60s\t%.2f%%\n", titles, regcov->covx);
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                sprintf(titles, "[Target] Fraction Region covered (>=%ux)", f->cutoffs[x]);
+                fprintf(fc, "%60s\t%.2f%%\n", titles, regcov->cov_array[x]);
+            }
         }
         // tgt regions
 
@@ -1362,15 +1494,16 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
         fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=10x)", flkcov->cov10);
         fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=30x)", flkcov->cov30);
         fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=100x)", flkcov->cov100);
-        fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=200x)", flkcov->cov200);
-        fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=300x)", flkcov->cov300);
-        fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=500x)", flkcov->cov500);
-        fprintf(fc, "%60s\t%.2f%%\n", "[flank] Coverage (>=1000x)", flkcov->cov1000);
         if (f->cutoff)
         {
             char titles[40];
-            sprintf(titles, "[flank] Coverage (>=%ux)", f->cutoff);
-            fprintf(fc, "%60s\t%.2f%%\n", titles, flkcov->covx);
+            // sprintf(titles, "[flank] Coverage (>=%ux)", f->cutoff);
+            // fprintf(fc, "%60s\t%.2f%%\n", titles, flkcov->covx);
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                sprintf(titles, "[flank] Coverage (>=%ux)", f->cutoffs[x]);
+                fprintf(fc, "%60s\t%.2f%%\n", titles, flkcov->cov_array[x]);
+            }
         }
 
     } while (0);
@@ -1415,7 +1548,8 @@ int bamdst(int argc, char *argv[])
     int n, i;
     char *probe = 0;
 
-    struct opt_aux opt = {.inputs = NULL, .isize_lim = 2000, .mapQ_lim = 20};
+    // struct opt_aux opt = {.inputs = NULL, .isize_lim = 2000, .mapQ_lim = 20};
+    struct opt_aux opt = init_opt_aux();
     while ((n = getopt_long(argc, argv, "o:p:f:q:l:h1v", long_opts, NULL)) >= 0)
     {
         switch (n)
@@ -1437,7 +1571,28 @@ int bamdst(int argc, char *argv[])
             opt.maxdepth = atoi(optarg);
             break;
         case CUTOFF:
-            opt.cutoff = atoi(optarg);
+            // opt.cutoff = atoi(optarg);
+            // break;
+            opt.cutoff = TRUE;
+            char *token = strtok(optarg, ",");
+            int tmp;
+            while (token != NULL)
+            {
+                if (opt.num_cutoffs >= opt.max_cutoffs)
+                {
+                    fprintf(stderr, "Too many cutoff depths specified\n");
+                    exit(EXIT_FAILURE);
+                }
+                tmp = atoi(token);
+                // opt.cutoffs[opt.num_cutoffs++] = atoi(token);
+                opt.cutoffs[opt.num_cutoffs++] = tmp;
+                token = strtok(NULL, ",");
+            }
+            for (int i = 0; i < opt.num_cutoffs; i++)
+            {
+                printf("[warning!] This is opt.cutoffs[%d], %d\n", i, opt.cutoffs[i]);
+            }
+            printf("[warning!] This is opt.num_cutoffs is %d\n", opt.num_cutoffs);
             break;
         // uncover_cutoff must be greater than 0
         case UNCOVER:
@@ -1546,6 +1701,7 @@ int bamdst(int argc, char *argv[])
     freemem(opt.inputs);
     if (export_target_bam)
         bam_close(bamoutfp);
+    freemem(opt.cutoffs);
 freeall:
     freemem(export_target_bam);
     freemem(outdir);
