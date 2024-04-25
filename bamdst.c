@@ -1246,8 +1246,8 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs) {
             "[Total] Fraction of MapQ reads in mapped reads",
             (float)fs->n_qual / fs->n_mapped * 100);
     // insert
-    fprintf(fc, "%60s\t%.2f\n", "[Insert szie] Average", iavg);
-    fprintf(fc, "%60s\t%.ld\n", "[Insert szie] Median", imed);
+    fprintf(fc, "%60s\t%.2f\n", "[Insert size] Average", iavg);
+    fprintf(fc, "%60s\t%.ld\n", "[Insert size] Median", imed);
     // tgt
     fprintf(fc, "%60s\t%" PRIu64 "\n", "[Target] Target Reads", fs->n_tgt);
     fprintf(fc, "%60s\t%.2f%%\n",
