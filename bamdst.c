@@ -1226,7 +1226,7 @@ uint64_t cntcov_cal2(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint
     cov->cnt30 = rawcnt - cov->cnt30;
     cov->cnt100 = rawcnt - cov->cnt100;
     cov->cnt02x = rawcnt - cov->cnt02x;
-    cov->cov05x = rawcnt - cov->cov05x;
+    cov->cnt05x = rawcnt - cov->cnt05x;
     cov->cov = (float)cov->cnt / rawcnt * 100;
     cov->cov4 = (float)cov->cnt4 / rawcnt * 100;
     cov->cov10 = (float)cov->cnt10 / rawcnt * 100;
