@@ -38,6 +38,7 @@
 #include "khash.h"
 #include "knetfile.h"
 #include "kstring.h"
+#include <sys/stat.h>
 
 static char const *program_name = "bamdst";
 static char const *Version = "1.0.9";
@@ -723,7 +724,10 @@ loopbams_parameters_t *init_loopbams_parameters()
     para->pdepths->l = para->pdepths->m = 0;
     para->rcov->l = para->rcov->m = 0;
     if (outdir)
+    {
+        mkdirp(outdir, 0755);
         chdir(outdir);
+    }
     para->fdep = bgzf_open("depth.tsv.gz", "w");
     if (isNull(para->fdep))
         errabort("failed to open file depth.tsv.gz");
@@ -901,10 +905,49 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
     return 0;
 }
 
+/**
+ * @brief 如果文件夹路径不存在则创建该路径
+ * @param path
+ * @param mode
+ * @return
+ */
+int mkdirp(const char *path, mode_t mode)
+{
+    char tmp[256];
+    char *p;
+
+    // 确保路径不以 '/' 结束，除非它是根目录
+    snprintf(tmp, sizeof(tmp), "%.*s", (int)(strlen(path) < sizeof(tmp) - 1) ? strlen(path) : sizeof(tmp) - 1, path);
+
+    for (p = &tmp[1]; *p; p++)
+    {
+        if (*p == '/')
+        {
+            *p = '\0'; // 分割点
+            if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+            {
+                fprintf(stderr, "Failed to create directory '%s': %s\n", tmp, strerror(errno));
+                return -1;
+            }
+            *p = '/'; // 恢复路径
+        }
+    }
+    // 创建最后的目录
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+    {
+        fprintf(stderr, "Failed to create directory '%s': %s\n", tmp, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 void write_unover_file()
 {
     if (outdir)
+    {
+        mkdirp(outdir, 0755);
         chdir(outdir);
+    }
     bedHand->merge(h_uncov);
     bedHand->base1to0(h_uncov);
     bedHand->save("uncover.bed", h_uncov);
@@ -921,7 +964,10 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     ksprintf(para->pdepths, "#Chr\tPos\tRaw Depth\tRmdup depth\tCover depth\n");
     ksprintf(para->rcov, "#Chr\tStart\tStop\tAvg depth\tMedian\tCoverage\tCoverage(FIX)\n");
     if (outdir)
-        chdir(outdir); // FIXME: if there is no such dir?
+    {
+        mkdirp(outdir, 0755);
+        chdir(outdir);
+    }
     h_uncov_init();
     int i;
     for (i = 0; i < a->ndata; ++i)
@@ -1280,7 +1326,10 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 {
     int i;
     if (outdir)
+    {
+        mkdirp(outdir, 0755);
         chdir(outdir);
+    }
     FILE *finsert;
     FILE *fdep;
     finsert = open_wfile("insertsize.plot");
