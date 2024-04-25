@@ -1,5 +1,6 @@
 /* The MIT License
 
+   Copyright (c) 2022, 2023, 2024 Authors
    Copyright (c) 2013-2014 Beijing Genomics Institution (BGI)
 
    Permission is hereby granted, free of charge, to any person obtaining
@@ -23,7 +24,6 @@
    SOFTWARE.
 */
 
-/* Author: Quan Shi (shiquan@genomics.cn) */
 
 #include "bedutil.h"
 #include "commons.h"
@@ -41,7 +41,7 @@
 #include <sys/stat.h>
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.0.9";
+static char const *Version = "1.1.0";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -81,7 +81,7 @@ int check_filename_isbam(char *name)
     return 0;
 }
 
-static const int WINDOW_SIZE = 102400;
+// static const int WINDOW_SIZE = 102400;
 // force replace the existed files
 // static bool is_forced = TRUE;
 
@@ -457,14 +457,14 @@ Optional parameters:\n\
    -f, --flank [200]   flank n bp of each region\n\
    -q [20]             map quality cutoff value, greater or equal to the value will be count\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
-   --cutoffdepth [0]   list the coverage of above depths, max_cutoffs is 10.\n\
+   --cutoffdepth [0,0] list the coverage of above these depths, allow maximal 10 cutoffs.\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
    --bamout  BAMFILE   target reads will be exported to this bam file\n\
    -1                  begin position of bed file is 1-based\n\
    -h, --help          print this help info\n\
 \n");
-        /*-d, --rmdup         remove dup reads when calculate depth\n	\*/
+
         puts("\
 * Five essential files would be created in the output dir. \n\
 * region.tsv.gz and depth.tsv.gz are zipped by bgzip, so you can use tabix \n\
@@ -495,6 +495,43 @@ Optional parameters:\n\
     }
     exit(EXIT_SUCCESS);
 }
+
+/**
+ * @brief 如果文件夹路径不存在则创建该路径
+ * @param path
+ * @param mode
+ * @return
+ */
+int mkdirp(const char *path, mode_t mode)
+{
+    char tmp[256];
+    char *p;
+
+    // 确保路径不以 '/' 结束，除非它是根目录
+    snprintf(tmp, sizeof(tmp), "%.*s", (int)(strlen(path) < sizeof(tmp) - 1) ? strlen(path) : sizeof(tmp) - 1, path);
+
+    for (p = &tmp[1]; *p; p++)
+    {
+        if (*p == '/')
+        {
+            *p = '\0'; // 分割点
+            if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+            {
+                fprintf(stderr, "Failed to create directory '%s': %s\n", tmp, strerror(errno));
+                return -1;
+            }
+            *p = '/'; // 恢复路径
+        }
+    }
+    // 创建最后的目录
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+    {
+        fprintf(stderr, "Failed to create directory '%s': %s\n", tmp, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 
 #include "ksort.h"
 
@@ -902,42 +939,6 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
         count_increase(a->c_flkdep, node->vals[j], uint32_t);
     del_node(para->flk_node);
     depnode_init(para->flk_node);
-    return 0;
-}
-
-/**
- * @brief 如果文件夹路径不存在则创建该路径
- * @param path
- * @param mode
- * @return
- */
-int mkdirp(const char *path, mode_t mode)
-{
-    char tmp[256];
-    char *p;
-
-    // 确保路径不以 '/' 结束，除非它是根目录
-    snprintf(tmp, sizeof(tmp), "%.*s", (int)(strlen(path) < sizeof(tmp) - 1) ? strlen(path) : sizeof(tmp) - 1, path);
-
-    for (p = &tmp[1]; *p; p++)
-    {
-        if (*p == '/')
-        {
-            *p = '\0'; // 分割点
-            if (mkdir(tmp, mode) != 0 && errno != EEXIST)
-            {
-                fprintf(stderr, "Failed to create directory '%s': %s\n", tmp, strerror(errno));
-                return -1;
-            }
-            *p = '/'; // 恢复路径
-        }
-    }
-    // 创建最后的目录
-    if (mkdir(tmp, mode) != 0 && errno != EEXIST)
-    {
-        fprintf(stderr, "Failed to create directory '%s': %s\n", tmp, strerror(errno));
-        return -1;
-    }
     return 0;
 }
 
