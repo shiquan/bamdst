@@ -760,11 +760,7 @@ loopbams_parameters_t *init_loopbams_parameters()
     para->rcov = (kstring_t *)needmem(sizeof(kstring_t));
     para->pdepths->l = para->pdepths->m = 0;
     para->rcov->l = para->rcov->m = 0;
-    if (outdir)
-    {
-        mkdirp(outdir, 0755);
-        chdir(outdir);
-    }
+    if (outdir) chdir(outdir);
     para->fdep = bgzf_open("depth.tsv.gz", "w");
     if (isNull(para->fdep))
         errabort("failed to open file depth.tsv.gz");
@@ -944,11 +940,7 @@ int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
 
 void write_unover_file()
 {
-    if (outdir)
-    {
-        mkdirp(outdir, 0755);
-        chdir(outdir);
-    }
+    if (outdir) chdir(outdir);
     bedHand->merge(h_uncov);
     bedHand->base1to0(h_uncov);
     bedHand->save("uncover.bed", h_uncov);
@@ -964,11 +956,7 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     loopbams_parameters_t *para = init_loopbams_parameters();
     ksprintf(para->pdepths, "#Chr\tPos\tRaw Depth\tRmdup depth\tCover depth\n");
     ksprintf(para->rcov, "#Chr\tStart\tStop\tAvg depth\tMedian\tCoverage\tCoverage(FIX)\n");
-    if (outdir)
-    {
-        mkdirp(outdir, 0755);
-        chdir(outdir);
-    }
+    if (outdir) chdir(outdir);
     h_uncov_init();
     int i;
     for (i = 0; i < a->ndata; ++i)
@@ -1326,11 +1314,7 @@ float average_cnt(count32_t *cnt)
 int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 {
     int i;
-    if (outdir)
-    {
-        mkdirp(outdir, 0755);
-        chdir(outdir);
-    }
+    if (outdir) chdir(outdir);
     FILE *finsert;
     FILE *fdep;
     finsert = open_wfile("insertsize.plot");
@@ -1674,6 +1658,7 @@ int bamdst(int argc, char *argv[])
     }
 
     n = argc - optind;
+    mkdirp(outdir, 0755);
     // capable of deals with severl bam files
     aux_t *aux;
     aux = aux_init();
