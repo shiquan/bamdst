@@ -6,6 +6,19 @@ Bam file(s) should be properly sorted, and the probe file (bed file) and the out
 
 must be specified in the first place.
 
+## Install
+```
+git clone https://github.com/shiquan/bamdst
+cd bamdst
+make
+```
+
+Or by conda. Thanks @xdgene
+```
+conda install xdgene::bamdst
+```
+
+
 ## USAGE
 
 Normal:
