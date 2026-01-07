@@ -1,33 +1,54 @@
-# bamdst -- a BAM Depth Stat Tool
+# xamdst -- a BAM/CRAM Depth Stat Tool
 
-Bamdst is a lightweight tool to stat the depth coverage of  target regions of bam file(s).
+This project is a hard fork of [bamdst by shiquan](https://github.com/shiquan/bamdst). It has been refactored to use HTSlib instead of the legacy samlib/bam.h, bringing support for multi-threading and CRAM format.
 
-Bam file(s) should be properly sorted, and the probe file (bed file) and the output dir
+xamdst is a lightweight tool to stat the depth coverage of target regions of BAM/CRAM/SAM file(s).
+
+Input files should be properly sorted, and the probe file (bed file) and the output dir
 
 must be specified in the first place.
 
+## Dependencies
+
+- **htslib** - Required for BAM/CRAM/SAM file reading and writing
+- **zlib** - Required for compression
+- **pthread** - Required for multi-threading support
+
+On Debian/Ubuntu:
+```bash
+apt-get install libhts-dev zlib1g-dev
+```
+
+On macOS with Homebrew:
+```bash
+brew install htslib
+```
+
 ## Install
 ```
-git clone https://github.com/shiquan/bamdst
-cd bamdst
+git clone https://github.com/pzweuj/xamdst
+cd xamdst
 make
 ```
 
-Or by conda. Thanks @xdgene
+or Docker
 ```
-conda install xdgene::bamdst
+docker pull ghcr.io/pzweuj/mapping:2026Jan
 ```
-
 
 ## USAGE
 
 Normal:
 
-	bamdst -p <probe.bed> -o ./ in1.bam
+	xamdst -p <probe.bed> -o ./ in1.bam
+
+With multi-threading (8 threads):
+
+	xamdst -p <probe.bed> -o ./ --threads 8 in1.bam
 
 Pipeline mode:
 
-	samtools view in1.bam -u | bamdst -p x.bed -o ./ -
+	samtools view in1.bam -u | xamdst -p x.bed -o ./ -
 
 ## PARAMETERS
 
@@ -71,17 +92,26 @@ value for reasonal visual purpose. Default is 2000.
 
 set this cutoff value for calculate the bad covered region. Default is <5.
 
---use_rmdup (an invalid parament since v1.0.0 )
+--depthratio [ratios]
 
-Use rmdup depth instead of cover depth to calculate the coverage of target regions and
+specify depth ratios for coverage calculation relative to average depth.
 
-so on.
+Use comma-separated values like "0.1,0.2,0.5". Default is "0.2,0.5".
+
+This calculates coverage at positions with depth > (ratio × average_depth).
+
+--threads [num]
+
+set the number of threads for BAM/CRAM I/O operations. Uses htslib's native
+multi-threading for faster decompression and compression. Default is 0 (single-threaded mode).
 
 ## OUTPUT FILES
 
-Seven files will be created in the output direction. There are:
+Eight files will be created in the output direction. There are:
 
 -**coverage.report**
+
+-**coverage.report.json** (NEW: JSON format for programmatic access)
 
 -**cumu.plot**
 

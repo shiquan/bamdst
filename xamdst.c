@@ -1,5 +1,6 @@
 /* The MIT License
 
+   Copyright (c) 2026 pzweuj - Ported to HTSlib
    Copyright (c) 2022, 2023, 2024 Authors
    Copyright (c) 2013-2014 Beijing Genomics Institution (BGI)
 
@@ -29,19 +30,22 @@
 #include "commons.h"
 #include "count.h"
 
-// bam.h and sam_header.h are standard header from samtools
-#include "bam.h"
-#include "sam_header.h"
+// bgzf for writing tabix-able depth.gz file
+#include <htslib/bgzf.h>
+
+// htslib for BAM/CRAM/SAM file reading
+#include <htslib/sam.h>
+#include <htslib/hts.h>
+#include <htslib/faidx.h>
 
 // khash, kstring and knetfile are standard utils of klib
-#include "bgzf.h" // write tabix-able depth.gz file
 #include "khash.h"
 #include "knetfile.h"
 #include "kstring.h"
 #include <sys/stat.h>
 
-static char const *program_name = "bamdst";
-static char const *Version = "1.1.0";
+static char const *program_name = "xamdst";
+static char const *Version = "2.0.0";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
@@ -57,8 +61,10 @@ static bool stdin_lock = FALSE;
 static bool zero_based = TRUE;
 
 /* 定义 max cutoff 最大值为10 */
-
 static const int MAX_CUTOFFS = 10;
+
+/* I/O 缓冲区大小优化 - 64KB 缓冲区减少系统调用次数 */
+static const int WRITE_BUFFER_SIZE = 65536;
 
 /* The number of threads after which there are
    diminishing performance gains. */
@@ -71,7 +77,7 @@ static const int MAX_CUTOFFS = 10;
 
 /* export target reads to a specitified bam file */
 static char *export_target_bam = NULL;
-bamFile bamoutfp;
+htsFile *bamoutfp = NULL;
 
 int check_filename_isbam(char *name)
 {
@@ -103,21 +109,19 @@ void h_chrlength_init()
     h_chrlen = kh_init(chr);
 }
 
-// warp bamheader to retrieve chromosome legth hash
-void header2chrhash(bam_header_t *h)
+// warp sam header to retrieve chromosome length hash
+void header2chrhash(sam_hdr_t *h)
 {
-    int i, n, ret;
+    int i, ret;
     khiter_t k;
-    h->dict = sam_header_parse2(h->text);
-    const char *tags[] = {"SN", "LN", "UR", "M5", NULL};
-    char **tbl = sam_header2tbl_n(h->dict, "SQ", tags, &n);
-    for (i = 0; i < n; i++)
+    int n_targets = sam_hdr_nref(h);
+    for (i = 0; i < n_targets; i++)
     {
-        k = kh_put(chr, h_chrlen, strdup(tbl[4 * i]), &ret);
-        kh_val(h_chrlen, k).length = atoi(tbl[4 * i + 1]);
+        const char *name = sam_hdr_tid2name(h, i);
+        hts_pos_t len = sam_hdr_tid2len(h, i);
+        k = kh_put(chr, h_chrlen, strdup(name), &ret);
+        kh_val(h_chrlen, k).length = (uint32_t)len;
     }
-    if (tbl)
-        free(tbl);
 }
 
 void chrhash_destroy()
@@ -154,6 +158,15 @@ struct opt_aux
     int *cutoffs;    // 指向 cutoff 数组的指针
     int mapQ_lim;
     int maxdepth;
+    // 新增：深度比例参数
+    bool depth_ratio;   // 是否启用深度比例统计
+    int num_ratios;     // 比例数量
+    int max_ratios;     // 最大比例数量
+    float *ratios;      // 比例数组 (如 0.1, 0.2, 0.5)
+    // 新增：参考基因组路径（用于 CRAM 文件）
+    char *reference;    // 参考基因组 FASTA 文件路径
+    // 新增：线程数
+    int nthreads;       // htslib 多线程压缩/解压缩线程数
 };
 
 // 一个函数来初始化 opt_aux 结构体
@@ -175,6 +188,27 @@ struct opt_aux init_opt_aux()
     opt.inputs = NULL;
     opt.isize_lim = 2000;
     opt.mapQ_lim = 20;
+    
+    // 初始化深度比例参数
+    opt.depth_ratio = TRUE;  // 默认启用
+    opt.num_ratios = 2;      // 默认2个比例
+    opt.max_ratios = MAX_CUTOFFS;
+    opt.ratios = malloc(opt.max_ratios * sizeof(float));
+    if (opt.ratios == NULL)
+    {
+        fprintf(stderr, "Memory allocation failed for ratios\n");
+        exit(EXIT_FAILURE);
+    }
+    // 设置默认比例值 0.2 和 0.5
+    opt.ratios[0] = 0.2f;
+    opt.ratios[1] = 0.5f;
+    
+    // 初始化参考基因组路径
+    opt.reference = NULL;
+
+    // 初始化线程数（0 = 单线程模式，不使用多线程）
+    opt.nthreads = 0;
+
     return opt;
 }
 
@@ -287,10 +321,10 @@ struct _aux
     uint64_t tgt_len, flk_len;
     unsigned tgt_nreg;
 
-    /* data, array of bam struct
-     * h,  point to bam header */
-    bamFile *data;
-    bam_header_t *h;
+    /* data, array of htsFile pointers for BAM/CRAM/SAM
+     * h,  point to sam header */
+    htsFile **data;
+    sam_hdr_t *h;
 
     /* h_tgt, target bed hash
      * h_flk, flank bed hash */
@@ -312,8 +346,8 @@ struct _aux *aux_init()
     struct _aux *a;
     a = calloc(1, sizeof(struct _aux));
     a->nchr = a->maxdep = a->ndata = 0;
-    a->data = NULL; // bamFile
-    a->h = NULL;    // bam header
+    a->data = NULL; // htsFile array
+    a->h = NULL;    // sam header
     a->h_tgt = kh_init(reg);
     a->h_flk = kh_init(reg);
     count32_init(a->c_dep);
@@ -335,7 +369,7 @@ void aux_destroy(struct _aux *a)
     free(a->data);
     bedHand->destroy((void *)a->h_tgt, destroy_data);
     bedHand->destroy((void *)a->h_flk, destroy_void);
-    bam_header_destroy(a->h);
+    sam_hdr_destroy(a->h);
     /* if (a->c_dep->n > 0) count_destroy(a->c_dep); */
     /* if (a->c_rmdupdep->n > 0) count_destroy(a->c_rmdupdep); */
     /* if (a->c_flkdep->n > 0) count_destroy(a->c_flkdep); */
@@ -443,34 +477,43 @@ void usage(int status)
         printf("\n\
 bamdst version: %s\n\
 USAGE : %s [OPTION] -p <probe.bed> -o <output_dir> [in1.bam [in2.bam ... ]]\n\
+   or : %s [OPTION] -p <probe.bed> -o <output_dir> [in1.cram] -T <ref.fa>\n\
    or : %s [OPTION] -p <probe.bed> -o <output_dir> -\n\
 ",
-               Version, program_name, program_name);
+               Version, program_name, program_name, program_name);
         puts("\
 Option -o and -p are mandatory:\n\
-  -o, --outdir         output dir\n\
+  -o, --outdir         output dir (will be created if not exists)\n\
   -p, --bed            probe or target regions file, the region file will \n\
                        be merged before calculate depths\n\
 ");
         puts("\
 Optional parameters:\n\
+   -T, --reference FILE  reference genome FASTA file (required for CRAM input)\n\
    -f, --flank [200]   flank n bp of each region\n\
    -q [20]             map quality cutoff value, greater or equal to the value will be count\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
    --cutoffdepth [0,0] list the coverage of above these depths, allow maximal 10 cutoffs.\n\
+   --depthratio [0.2,0.5] coverage at ratios of average depth (e.g., 0.1,0.2,0.5)\n\
    --isize [2000]      stat the inferred insert size under this value\n\
    --uncover [5]       region will included in uncover file if below it\n\
    --bamout  BAMFILE   target reads will be exported to this bam file\n\
+   --threads [0]       number of threads for BAM/CRAM I/O (0 = single-threaded)\n\
    -1                  begin position of bed file is 1-based\n\
    -h, --help          print this help info\n\
 \n");
 
         puts("\
+* Supported input formats: BAM, CRAM, SAM\n\
+* CRAM files require a reference genome (-T/--reference option)\n\
+* The output directory will be created automatically if it doesn't exist\n\
+\n\
 * Five essential files would be created in the output dir. \n\
 * region.tsv.gz and depth.tsv.gz are zipped by bgzip, so you can use tabix \n\
   index these files.\n\n\
  - coverage.report     a report of the coverage information and reads \n\
                        information of whole target regions\n\
+ - coverage.report.json  JSON format of coverage report for easy parsing\n\
  - cumu.plot           distribution data of depth values\n\
  - insert.plot         distribution data of inferred insert size \n\
  - chromosome.report   coverage information for each chromosome\n\
@@ -491,7 +534,7 @@ Optional parameters:\n\
 ");
         puts("============\n");
         puts(" HOMEPAGE: \n\
-      https://github.com/shiquan/bamdst\n");
+      https://github.com/pzweuj/xamdst\n");
     }
     exit(EXIT_SUCCESS);
 }
@@ -579,11 +622,18 @@ static float coverage_cal(const uint32_t *array, int l)
     return cov * 100;
 }
 
-// FIXME: need broken when bed file is truncated
+// 加载并初始化 BED 文件，包含截断检测
 int load_bed_init(char const *fn, aux_t *a)
 {
     int ret = 0;
     bedHand->read(fn, a->h_tgt, 0, 0, &ret);
+    
+    // 检查 BED 文件是否为空
+    if (kh_size(a->h_tgt) == 0)
+    {
+        errabort("Failed to read BED file: %s (file may be empty or corrupted)", fn);
+    }
+    
     if (zero_based && ret)
     {
         warnings("This region is not a standard bed format.\n"
@@ -699,8 +749,8 @@ int readcore(struct depnode *header, bam1_t const *b, cntstat_t state)
     /* header = tmp; */
     if (isNull(tmp))
         return 0;
-    uint32_t *cigar = bam1_cigar(b);
-    uint32_t end = bam_calend(c, cigar);
+    uint32_t *cigar = bam_get_cigar(b);
+    uint32_t end = bam_endpos(b);
 
     if (end >= tmp->start)
     {
@@ -855,7 +905,11 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
         {
             push_bedreg(para->ucreg, lst_start, lst_stop);
         }
-        write_buffer_bgzf(para->pdepths, para->fdep);
+        // 优化：只有当缓冲区超过阈值时才写入
+        if (para->pdepths->l > WRITE_BUFFER_SIZE)
+        {
+            write_buffer_bgzf(para->pdepths, para->fdep);
+        }
     }
     else
     {
@@ -863,6 +917,10 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
         for (j = 0; j < node->len; ++j)
         {
             ksprintf(para->pdepths, "%s\t%d\t0\t0\t0\n", para->name, node->start + j);
+        }
+        // 优化：批量写入而不是每行都写
+        if (para->pdepths->l > WRITE_BUFFER_SIZE)
+        {
             write_buffer_bgzf(para->pdepths, para->fdep);
         }
         push_bedreg(para->ucreg, node->start, node->stop); // store uncover region
@@ -874,8 +932,11 @@ int stat_each_region(loopbams_parameters_t *para, aux_t *a)
     ksprintf(para->rcov, "%s\t%u\t%u\t%.2f\t%.1f\t%.2f\t%.2f\n", para->name, node->start - 1, node->stop, avg, med,
              cov1, cov2);
 
-    // if (para->rcov->l > WINDOW_SIZE)
-    write_buffer_bgzf(para->rcov, para->freg);
+    // 优化：只有当缓冲区超过阈值时才写入
+    if (para->rcov->l > WRITE_BUFFER_SIZE)
+    {
+        write_buffer_bgzf(para->rcov, para->freg);
+    }
     return 0;
 }
 
@@ -952,7 +1013,7 @@ void write_unover_file()
 int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 {
     // get the chromosome name from header
-    bam_header_t *h = a->h;
+    sam_hdr_t *h = a->h;
     loopbams_parameters_t *para = init_loopbams_parameters();
     ksprintf(para->pdepths, "#Chr\tPos\tRaw Depth\tRmdup depth\tCover depth\n");
     ksprintf(para->rcov, "#Chr\tStart\tStop\tAvg depth\tMedian\tCoverage\tCoverage(FIX)\n");
@@ -961,25 +1022,25 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     int i;
     for (i = 0; i < a->ndata; ++i)
     {
-        bamFile dat = a->data[i];
+        htsFile *dat = a->data[i];
         bool goto_next_chromosome = FALSE;
         int ret;
         cntstat_t state;
         // main loop
         bam1_t *b;
-        b = (bam1_t *)needmem(sizeof(bam1_t));
+        b = bam_init1();
 
         while (1)
         {
             state = CMATCH;
-            ret = bam_read1(dat, b);
+            ret = sam_read1(dat, h, b);
             if (ret == -1)
             {
                 break; // normal end
             }
-            if (ret == -2)
+            if (ret < -1)
             {
-                errabort("%d bam file is truncated!\n", i + 1);
+                errabort("%d bam/cram file is truncated or corrupted!\n", i + 1);
             }
             bam1_core_t *c = &b->core;
             // skip secondary and supplement alignment first
@@ -1031,7 +1092,17 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 
             // if tid != c->tid, completed the stat of the last chromosome
             // init the new chromosome node and clean the memory
-            // FIXME: need multi thread to improve it or NOT?
+            // 
+            // 多线程优化说明：
+            // 当前实现是单线程顺序处理，可以考虑以下多线程方案：
+            // 1. 按染色体并行：每个线程处理一个染色体的深度统计
+            //    - 优点：实现简单，线程间无数据竞争
+            //    - 缺点：需要预先读取整个 BAM 文件或使用索引
+            // 2. 生产者-消费者模式：一个线程读取 BAM，多个线程统计
+            //    - 优点：可以流式处理
+            //    - 缺点：需要线程安全的队列和同步机制
+            // 目前保持单线程实现，因为 I/O 通常是瓶颈
+            //
             if (para->tid != c->tid)
             {
                 goto_next_chromosome = FALSE; // clean the flag of skiping
@@ -1058,7 +1129,7 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                 }
 
                 para->tid = c->tid;
-                para->name = h->target_name[c->tid];
+                para->name = (char *)sam_hdr_tid2name(h, c->tid);
 
                 // impossible in normal pratices, only happens in the different bam
                 // headers
@@ -1093,15 +1164,20 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                 para->flk_node = bed_depnode_list(para->flk);
                 para->tar->flag = para->flk->flag = 1;
 
-                /* the next part is init uncover region hash*/
+                /* 初始化 uncover region hash
+                 * 注意：这里不能直接使用 ucreg_tmp 指针，因为 kh_val 返回的是值的拷贝
+                 * 我们需要获取 hash 表中实际存储位置的地址
+                 * 这样后续对 para->ucreg 的修改才能反映到 hash 表中
+                 */
                 k = kh_put(reg, h_uncov, strdup(para->name), &ret);
 
                 bedreglist_t *ucreg_tmp;
                 ucreg_tmp = (bedreglist_t *)needmem(sizeof(bedreglist_t));
+                memset(ucreg_tmp, 0, sizeof(bedreglist_t));  // 确保初始化为零
                 kh_val(h_uncov, k) = *ucreg_tmp;
-                para->ucreg = &kh_val(h_uncov, k); // FIXME: I don't understand why
-                                                   // couldn't use ucreg_tmp directly
-                                                   /* finish init */
+                mustfree(ucreg_tmp);  // 释放临时变量，数据已拷贝到 hash 表
+                para->ucreg = &kh_val(h_uncov, k);  // 获取 hash 表中的实际地址
+                /* finish init */
             }
             while (para->flk_node && para->flk_node->stop < para->lstpos + 1)
             {
@@ -1121,14 +1197,14 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
             if (para->tgt_node && readcore(para->tgt_node, b, state))
             {
                 if (export_target_bam)
-                    bam_write1(bamoutfp, b);
+                    sam_write1(bamoutfp, a->h, b);
                 fs->n_tgt++;
             }
 
             // endcore:
         }
         bam_destroy1(b);
-        bgzf_close(a->data[i]);
+        hts_close(a->data[i]);
     }
     while (para->tgt_node)
     {
@@ -1155,6 +1231,16 @@ struct regcov
     // MAX_CUTOFFS
     uint64_t cnt_array[10];
     float cov_array[10];
+    
+    // 新增：rmdup depth 覆盖度统计
+    uint64_t cnt_rmdup, cnt4_rmdup, cnt10_rmdup, cnt30_rmdup, cnt100_rmdup;
+    float cov_rmdup, cov4_rmdup, cov10_rmdup, cov30_rmdup, cov100_rmdup;
+    uint64_t cnt_array_rmdup[10];
+    float cov_array_rmdup[10];
+    
+    // 新增：基于比例的覆盖度统计
+    uint64_t cnt_ratio[10];
+    float cov_ratio[10];
 };
 
 struct regcov *regcov_init()
@@ -1280,20 +1366,148 @@ uint64_t cntcov_cal2(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint
     return rawcnt;
 }
 
-// FIXME: need improve soon!!!
+// 计算 rmdup depth 的覆盖度统计
+uint64_t cntcov_cal_rmdup(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint64_t *data, uint64_t tgt_len)
+{
+    uint64_t rawcnt = 0;
+    int i;
+    *data = 0;
+    
+    // 计算总数据量和平均深度
+    for (i = 0; i < cnt->m; ++i)
+    {
+        (*data) += cnt->a[i] * i;
+        rawcnt += cnt->a[i];
+    }
+    
+    if (rawcnt == 0)
+        return 0;
+    
+    // 计算各阈值下的覆盖度
+    uint64_t below_100 = 0, below_30 = 0, below_10 = 0, below_4 = 0;
+    
+    for (i = 0; i < cnt->m; ++i)
+    {
+        if (i < 100)
+            below_100 += cnt->a[i];
+        if (i < 30)
+            below_30 += cnt->a[i];
+        if (i < 10)
+            below_10 += cnt->a[i];
+        if (i < 4)
+            below_4 += cnt->a[i];
+        if (f->cutoff)
+        {
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                if (i < f->cutoffs[x])
+                    cov->cnt_array_rmdup[x] += cnt->a[i];
+            }
+        }
+    }
+    
+    // 计算 rmdup 覆盖度
+    cov->cnt_rmdup = rawcnt - (uint64_t)cnt->a[0];
+    cov->cnt4_rmdup = rawcnt - below_4;
+    cov->cnt10_rmdup = rawcnt - below_10;
+    cov->cnt30_rmdup = rawcnt - below_30;
+    cov->cnt100_rmdup = rawcnt - below_100;
+    
+    cov->cov_rmdup = (float)cov->cnt_rmdup / rawcnt * 100;
+    cov->cov4_rmdup = (float)cov->cnt4_rmdup / rawcnt * 100;
+    cov->cov10_rmdup = (float)cov->cnt10_rmdup / rawcnt * 100;
+    cov->cov30_rmdup = (float)cov->cnt30_rmdup / rawcnt * 100;
+    cov->cov100_rmdup = (float)cov->cnt100_rmdup / rawcnt * 100;
+    
+    if (f->cutoff)
+    {
+        for (int x = 0; x < f->num_cutoffs; x++)
+        {
+            cov->cnt_array_rmdup[x] = rawcnt - cov->cnt_array_rmdup[x];
+            cov->cov_array_rmdup[x] = (float)cov->cnt_array_rmdup[x] / rawcnt * 100;
+        }
+    }
+    
+    return rawcnt;
+}
+
+// 计算基于比例的覆盖度统计
+void cntcov_cal_ratio(struct opt_aux *f, struct regcov *cov, count32_t *cnt, uint64_t tgt_len)
+{
+    if (!f->depth_ratio || f->num_ratios == 0)
+        return;
+    
+    // 计算总数据量
+    uint64_t total_data = 0;
+    uint64_t rawcnt = 0;
+    int i;
+    
+    for (i = 0; i < cnt->m; ++i)
+    {
+        total_data += cnt->a[i] * i;
+        rawcnt += cnt->a[i];
+    }
+    
+    if (rawcnt == 0 || tgt_len == 0)
+        return;
+    
+    // 计算平均深度
+    float avg_depth = (float)total_data / tgt_len;
+    
+    // 对每个比例计算覆盖度
+    for (int r = 0; r < f->num_ratios; r++)
+    {
+        uint64_t threshold = (uint64_t)(f->ratios[r] * avg_depth);
+        uint64_t below_threshold = 0;
+        
+        for (i = 0; i < cnt->m && i <= threshold; ++i)
+        {
+            below_threshold += cnt->a[i];
+        }
+        
+        cov->cnt_ratio[r] = rawcnt - below_threshold;
+        cov->cov_ratio[r] = (float)cov->cnt_ratio[r] / rawcnt * 100;
+    }
+}
+
+// 计算深度分布的中位数
+// 使用累积分布查找，时间复杂度 O(n)
 float median_cnt(count32_t *cnt)
 {
+    if (cnt->m == 0)
+        return 0;
+    
     int i;
     uint64_t sum = 0;
+    
+    // 计算总数
     for (i = 0; i < cnt->m; ++i)
         sum += (uint64_t)cnt->a[i];
+    
+    if (sum == 0)
+        return 0;
+    
     uint64_t med = sum / 2;
     uint64_t num = 0;
+    
+    // 查找中位数位置
     for (i = 0; i < cnt->m; ++i)
     {
         num += (uint64_t)cnt->a[i];
         if (num >= med)
+        {
+            // 对于偶数个元素，返回两个中间值的平均
+            if (sum % 2 == 0 && num == med && i + 1 < cnt->m)
+            {
+                // 找下一个非零位置
+                int j = i + 1;
+                while (j < cnt->m && cnt->a[j] == 0)
+                    j++;
+                if (j < cnt->m)
+                    return (float)(i + j) / 2.0f;
+            }
             return (float)i;
+        }
     }
     return 0;
 }
@@ -1311,6 +1525,265 @@ float average_cnt(count32_t *cnt)
     return (float)sum / num;
 }
 
+// JSON 格式化输出 - 缩进级别跟踪
+static int json_indent_level = 0;
+static const char *JSON_INDENT = "  ";  // 2空格缩进
+
+static void json_newline_indent(kstring_t *s)
+{
+    kputc('\n', s);
+    for (int i = 0; i < json_indent_level; i++)
+        kputs(JSON_INDENT, s);
+}
+
+static void json_start_object(kstring_t *s)
+{
+    kputc('{', s);
+    json_indent_level++;
+}
+
+static void json_end_object(kstring_t *s)
+{
+    // Remove trailing comma if present
+    if (s->l > 0 && s->s[s->l - 1] == ',')
+        s->l--;
+    json_indent_level--;
+    json_newline_indent(s);
+    kputc('}', s);
+}
+
+static void json_start_array(kstring_t *s)
+{
+    kputc('[', s);
+}
+
+static void json_end_array(kstring_t *s)
+{
+    if (s->l > 0 && s->s[s->l - 1] == ',')
+        s->l--;
+    kputc(']', s);
+}
+
+static void json_key(kstring_t *s, const char *key)
+{
+    json_newline_indent(s);
+    ksprintf(s, "\"%s\": ", key);
+}
+
+static void json_string(kstring_t *s, const char *key, const char *value)
+{
+    json_newline_indent(s);
+    ksprintf(s, "\"%s\": \"%s\",", key, value);
+}
+
+static void json_int(kstring_t *s, const char *key, int64_t value)
+{
+    json_newline_indent(s);
+    ksprintf(s, "\"%s\": %" PRId64 ",", key, value);
+}
+
+static void json_uint(kstring_t *s, const char *key, uint64_t value)
+{
+    json_newline_indent(s);
+    ksprintf(s, "\"%s\": %" PRIu64 ",", key, value);
+}
+
+static void json_float(kstring_t *s, const char *key, float value)
+{
+    json_newline_indent(s);
+    ksprintf(s, "\"%s\": %.2f,", key, value);
+}
+
+/* Generate JSON format coverage report */
+int print_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
+                      struct regcov *tarcov, struct regcov *flkcov, 
+                      struct regcov *regcov, float iavg, uint64_t imed)
+{
+    if (outdir) chdir(outdir);
+    FILE *fjson = open_wfile("coverage.report.json");
+    if (!fjson) {
+        warnings("Failed to create coverage.report.json");
+        return -1;
+    }
+    // 设置更大的文件缓冲区
+    setvbuf(fjson, NULL, _IOFBF, WRITE_BUFFER_SIZE);
+    
+    // 重置缩进级别
+    json_indent_level = 0;
+    
+    kstring_t json = {0, 0, NULL};
+    
+    json_start_object(&json);
+    
+    // Version and files
+    json_string(&json, "version", Version);
+    json_key(&json, "files");
+    json_start_array(&json);
+    for (int i = 0; i < f->nfiles; ++i) {
+        ksprintf(&json, "\"%s\",", f->inputs[i]);
+    }
+    json_end_array(&json);
+    kputc(',', &json);
+    
+    // Total section
+    json_key(&json, "total");
+    json_start_object(&json);
+    json_uint(&json, "raw_reads", fs->n_reads);
+    json_uint(&json, "qc_fail_reads", fs->n_qcfail);
+    json_float(&json, "raw_data_mb", (float)fs->n_data / 1e6);
+    json_uint(&json, "paired_reads", fs->n_pair_all);
+    json_uint(&json, "mapped_reads", fs->n_mapped);
+    json_float(&json, "mapped_reads_fraction", (float)fs->n_mapped / fs->n_reads * 100);
+    json_float(&json, "mapped_data_mb", (float)fs->n_mdata / 1e6);
+    json_float(&json, "mapped_data_fraction", (float)fs->n_mdata / fs->n_data * 100);
+    json_uint(&json, "properly_paired", fs->n_pair_good);
+    json_float(&json, "properly_paired_fraction", (float)fs->n_pair_good / fs->n_reads * 100);
+    json_uint(&json, "read_mate_paired", fs->n_pair_map);
+    json_float(&json, "read_mate_paired_fraction", (float)fs->n_pair_map / fs->n_reads * 100);
+    json_uint(&json, "singletons", fs->n_sgltn);
+    json_uint(&json, "diff_chr", fs->n_diffchr);
+    json_uint(&json, "read1", fs->n_read1);
+    json_uint(&json, "read2", fs->n_read2);
+    json_uint(&json, "read1_rmdup", fs->n_rmdup1);
+    json_uint(&json, "read2_rmdup", fs->n_rmdup2);
+    json_uint(&json, "forward_strand", fs->n_pstrand);
+    json_uint(&json, "backward_strand", fs->n_mstrand);
+    json_uint(&json, "pcr_duplicates", fs->n_dup);
+    json_float(&json, "pcr_duplicates_fraction", (float)fs->n_dup / fs->n_mapped * 100);
+    json_int(&json, "mapq_cutoff", f->mapQ_lim);
+    json_uint(&json, "mapq_reads", fs->n_qual);
+    json_float(&json, "mapq_reads_fraction_all", (float)fs->n_qual / fs->n_reads * 100);
+    json_float(&json, "mapq_reads_fraction_mapped", (float)fs->n_qual / fs->n_mapped * 100);
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Insert size section
+    json_key(&json, "insert_size");
+    json_start_object(&json);
+    json_float(&json, "average", iavg);
+    json_uint(&json, "median", imed);
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Target section
+    json_key(&json, "target");
+    json_start_object(&json);
+    json_uint(&json, "target_reads", fs->n_tgt);
+    json_float(&json, "target_reads_fraction_all", (float)fs->n_tgt / fs->n_reads * 100);
+    json_float(&json, "target_reads_fraction_mapped", (float)fs->n_tgt / fs->n_mapped * 100);
+    json_float(&json, "target_data_mb", (float)fs->n_tdata / 1e6);
+    json_float(&json, "target_data_rmdup_mb", (float)fs->n_trmdat / 1e6);
+    json_float(&json, "target_data_fraction_all", (float)fs->n_tdata / fs->n_data * 100);
+    json_float(&json, "target_data_fraction_mapped", (float)fs->n_tdata / fs->n_mdata * 100);
+    json_uint(&json, "region_length", a->tgt_len);
+    json_float(&json, "average_depth", (float)fs->n_tdata / a->tgt_len);
+    json_float(&json, "average_depth_rmdup", (float)fs->n_trmdat / a->tgt_len);
+    
+    // Coverage sub-object
+    json_key(&json, "coverage");
+    json_start_object(&json);
+    json_float(&json, "gt_0x", tarcov->cov);
+    json_float(&json, "gte_4x", tarcov->cov4);
+    json_float(&json, "gte_10x", tarcov->cov10);
+    json_float(&json, "gte_30x", tarcov->cov30);
+    json_float(&json, "gte_100x", tarcov->cov100);
+    json_float(&json, "gt_0_2_avg", tarcov->cov02x);
+    json_float(&json, "gt_0_5_avg", tarcov->cov05x);
+    if (f->cutoff) {
+        json_key(&json, "custom");
+        json_start_object(&json);
+        for (int x = 0; x < f->num_cutoffs; x++) {
+            char key[32];
+            sprintf(key, "gte_%dx", f->cutoffs[x]);
+            json_float(&json, key, tarcov->cov_array[x]);
+        }
+        json_end_object(&json);
+        kputc(',', &json);
+    }
+    if (f->depth_ratio && f->num_ratios > 0) {
+        json_key(&json, "ratio_based");
+        json_start_object(&json);
+        for (int r = 0; r < f->num_ratios; r++) {
+            char key[32];
+            sprintf(key, "gt_%.1f_avg", f->ratios[r]);
+            json_float(&json, key, tarcov->cov_ratio[r]);
+        }
+        json_end_object(&json);
+        kputc(',', &json);
+    }
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Coverage rmdup sub-object
+    json_key(&json, "coverage_rmdup");
+    json_start_object(&json);
+    json_float(&json, "gt_0x", tarcov->cov_rmdup);
+    json_float(&json, "gte_4x", tarcov->cov4_rmdup);
+    json_float(&json, "gte_10x", tarcov->cov10_rmdup);
+    json_float(&json, "gte_30x", tarcov->cov30_rmdup);
+    json_float(&json, "gte_100x", tarcov->cov100_rmdup);
+    if (f->cutoff) {
+        json_key(&json, "custom");
+        json_start_object(&json);
+        for (int x = 0; x < f->num_cutoffs; x++) {
+            char key[32];
+            sprintf(key, "gte_%dx", f->cutoffs[x]);
+            json_float(&json, key, tarcov->cov_array_rmdup[x]);
+        }
+        json_end_object(&json);
+        kputc(',', &json);
+    }
+    json_end_object(&json);
+    kputc(',', &json);
+    
+    // Region coverage
+    json_uint(&json, "region_count", a->tgt_nreg);
+    json_key(&json, "region_coverage");
+    json_start_object(&json);
+    json_uint(&json, "gt_0x_count", regcov->cnt);
+    json_float(&json, "gt_0x_fraction", regcov->cov);
+    json_float(&json, "gte_4x_fraction", regcov->cov4);
+    json_float(&json, "gte_10x_fraction", regcov->cov10);
+    json_float(&json, "gte_30x_fraction", regcov->cov30);
+    json_float(&json, "gte_100x_fraction", regcov->cov100);
+    json_end_object(&json);
+    
+    json_end_object(&json);  // end target
+    kputc(',', &json);
+    
+    // Flank section
+    json_key(&json, "flank");
+    json_start_object(&json);
+    json_int(&json, "flank_size", flank_reg);
+    json_uint(&json, "region_length", a->flk_len);
+    json_float(&json, "average_depth", (float)fs->n_fdata / a->flk_len);
+    json_uint(&json, "flank_reads", fs->n_flk);
+    json_float(&json, "flank_reads_fraction_all", (float)fs->n_flk / fs->n_reads * 100);
+    json_float(&json, "flank_reads_fraction_mapped", (float)fs->n_flk / fs->n_mapped * 100);
+    json_float(&json, "flank_data_mb", (float)fs->n_fdata / 1e6);
+    json_float(&json, "flank_data_fraction_all", (float)fs->n_fdata / fs->n_data * 100);
+    json_float(&json, "flank_data_fraction_mapped", (float)fs->n_fdata / fs->n_mdata * 100);
+    json_key(&json, "coverage");
+    json_start_object(&json);
+    json_float(&json, "gt_0x", flkcov->cov);
+    json_float(&json, "gte_4x", flkcov->cov4);
+    json_float(&json, "gte_10x", flkcov->cov10);
+    json_float(&json, "gte_30x", flkcov->cov30);
+    json_float(&json, "gte_100x", flkcov->cov100);
+    json_end_object(&json);
+    
+    json_end_object(&json);  // end flank
+    
+    json_end_object(&json);  // end root
+    
+    // Write to file
+    fprintf(fjson, "%s\n", json.s);
+    fclose(fjson);
+    free(json.s);
+    
+    return 0;
+}
+
 int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 {
     int i;
@@ -1319,6 +1792,9 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     FILE *fdep;
     finsert = open_wfile("insertsize.plot");
     fdep = open_wfile("depth_distribution.plot");
+    // 设置更大的文件缓冲区以减少系统调用
+    setvbuf(finsert, NULL, _IOFBF, WRITE_BUFFER_SIZE);
+    setvbuf(fdep, NULL, _IOFBF, WRITE_BUFFER_SIZE);
 
     struct regcov *tarcov = regcov_init();
     struct regcov *flkcov = regcov_init();
@@ -1357,8 +1833,17 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     cntcov_cal(f, flkcov, a->c_flkdep, &fs->n_fdata);
     for (i = 0; i < a->c_rmdupdep->m; ++i)
         fs->n_trmdat += a->c_rmdupdep->a[i] * i;
+    
+    // 计算 rmdup depth 覆盖度统计
+    uint64_t rmdup_data;
+    cntcov_cal_rmdup(f, tarcov, a->c_rmdupdep, &rmdup_data, a->tgt_len);
+    
+    // 计算基于比例的覆盖度统计
+    cntcov_cal_ratio(f, tarcov, a->c_dep, a->tgt_len);
 
     FILE *fchrcov = open_wfile("chromosomes.report");
+    // 设置更大的文件缓冲区
+    setvbuf(fchrcov, NULL, _IOFBF, WRITE_BUFFER_SIZE);
     {
         fprintf(fchrcov, "%11s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s\t%10s", "#Chromosome", "DATA(%)", "Avg depth",
                 "Median", "Coverage%", "Cov 4x %", "Cov 10x %", "Cov 30x %", "Cov 100x %");
@@ -1419,6 +1904,8 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     }
     fclose(fchrcov);
     FILE *fc = open_wfile("coverage.report");
+    // 设置更大的文件缓冲区以减少系统调用
+    setvbuf(fc, NULL, _IOFBF, WRITE_BUFFER_SIZE);
     do
     {
         fprintf(fc, "## The file was created by %s\n", program_name);
@@ -1492,6 +1979,31 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                 fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->cov_array[x]);
             }
         }
+        // rmdup coverage statistics
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>0x)", tarcov->cov_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=4x)", tarcov->cov4_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=10x)", tarcov->cov10_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=30x)", tarcov->cov30_rmdup);
+        fprintf(fc, "%60s\t%.2f%%\n", "[Target] Coverage(rmdup) (>=100x)", tarcov->cov100_rmdup);
+        if (f->cutoff)
+        {
+            char titles[60];
+            for (int x = 0; x < f->num_cutoffs; x++)
+            {
+                sprintf(titles, "[Target] Coverage(rmdup) (>=%ux)", f->cutoffs[x]);
+                fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->cov_array_rmdup[x]);
+            }
+        }
+        // ratio-based coverage statistics
+        if (f->depth_ratio && f->num_ratios > 0)
+        {
+            char titles[60];
+            for (int r = 0; r < f->num_ratios; r++)
+            {
+                sprintf(titles, "[Target] Coverage (>%.1f*Avg)", f->ratios[r]);
+                fprintf(fc, "%60s\t%.2f%%\n", titles, tarcov->cov_ratio[r]);
+            }
+        }
         // tgt regions
         fprintf(fc, "%60s\t%u\n", "[Target] Target Region Count", a->tgt_nreg);
         fprintf(fc, "%60s\t%" PRIu64 "\n", "[Target] Region covered > 0x", regcov->cnt);
@@ -1542,6 +2054,9 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
 
     } while (0);
 
+    // 生成 JSON 格式报告
+    print_report_json(f, a, fs, tarcov, flkcov, regcov, iavg, imed);
+
     mustfree(tarcov);
     mustfree(regcov);
     mustfree(flkcov);
@@ -1556,6 +2071,9 @@ enum
     INSERTSIZE,
     UNCOVER,
     BAMOUT,
+    DEPTHRATIO,
+    REFERENCE,
+    THREADS,
     HELP
 };
 
@@ -1568,6 +2086,9 @@ static struct option const long_opts[] = {{"outdir", required_argument, NULL, 'o
                                           {"mapthres", required_argument, NULL, 'q'},
                                           {"uncover", required_argument, NULL, UNCOVER},
                                           {"bamout", required_argument, NULL, BAMOUT},
+                                          {"depthratio", required_argument, NULL, DEPTHRATIO},
+                                          {"reference", required_argument, NULL, 'T'},
+                                          {"threads", required_argument, NULL, THREADS},
                                           //{"rmdup", no_argument, NULL, 'd'},
                                           {"help", no_argument, NULL, 'h'},
                                           {"version", no_argument, NULL, 'v'}};
@@ -1577,14 +2098,14 @@ int show_version()
     printf("%s\n", Version);
     return 1;
 }
-int bamdst(int argc, char *argv[])
+int xamdst(int argc, char *argv[])
 {
     int n, i;
     char *probe = 0;
 
     // struct opt_aux opt = {.inputs = NULL, .isize_lim = 2000, .mapQ_lim = 20};
     struct opt_aux opt = init_opt_aux();
-    while ((n = getopt_long(argc, argv, "o:p:f:q:l:h1v", long_opts, NULL)) >= 0)
+    while ((n = getopt_long(argc, argv, "o:p:f:q:l:T:h1v", long_opts, NULL)) >= 0)
     {
         switch (n)
         {
@@ -1632,8 +2153,43 @@ int bamdst(int argc, char *argv[])
         case BAMOUT:
             export_target_bam = strdup(optarg);
             break;
+        case DEPTHRATIO:
+            // 解析用户指定的深度比例
+            {
+                char *ratio_token = strtok(optarg, ",");
+                opt.num_ratios = 0;  // 重置为用户指定的值
+                while (ratio_token != NULL)
+                {
+                    if (opt.num_ratios >= opt.max_ratios)
+                    {
+                        fprintf(stderr, "Too many depth ratios specified (max %d)\n", opt.max_ratios);
+                        exit(EXIT_FAILURE);
+                    }
+                    float ratio = atof(ratio_token);
+                    if (ratio <= 0.0f || ratio > 1.0f)
+                    {
+                        fprintf(stderr, "Invalid depth ratio: %s (must be between 0 and 1)\n", ratio_token);
+                        exit(EXIT_FAILURE);
+                    }
+                    opt.ratios[opt.num_ratios++] = ratio;
+                    ratio_token = strtok(NULL, ",");
+                }
+            }
+            break;
         case 'q':
             opt.mapQ_lim = atoi(optarg);
+            break;
+        case 'T':
+            // 参考基因组路径（用于 CRAM 文件）
+            opt.reference = strdup(optarg);
+            break;
+        case THREADS:
+            opt.nthreads = atoi(optarg);
+            if (opt.nthreads < 0)
+            {
+                fprintf(stderr, "Invalid thread count: %s\n", optarg);
+                exit(EXIT_FAILURE);
+            }
             break;
         case 'h':
             usage(1);
@@ -1650,7 +2206,7 @@ int bamdst(int argc, char *argv[])
         }
     }
     if (isNull(outdir) || isNull(probe))
-        usage(0);
+        usage(1);
     if (export_target_bam && check_filename_isbam(export_target_bam))
     {
         fprintf(stderr, "--bamout must be a bam file: %s", export_target_bam);
@@ -1659,53 +2215,116 @@ int bamdst(int argc, char *argv[])
 
     n = argc - optind;
     mkdirp(outdir, 0755);
-    // capable of deals with severl bam files
+    // capable of deals with several bam/cram files
     aux_t *aux;
     aux = aux_init();
     if (isZero(n))
     {
-        aux->data = (bamFile *)needmem(sizeof(bamFile));
-        aux->data[0] = bgzf_dopen(fileno(stdin), "r");
-        aux->h = bam_header_read(aux->data[0]);
+        aux->data = (htsFile **)needmem(sizeof(htsFile *));
+        aux->data[0] = hts_open("-", "r");
+        if (aux->data[0] == NULL)
+            errabort("Failed to open stdin for reading");
+        // Enable multi-threading for stdin reading
+        if (opt.nthreads > 0)
+        {
+            if (hts_set_threads(aux->data[0], opt.nthreads) != 0)
+            {
+                fprintf(stderr, "Warning: Failed to set %d threads for stdin\n", opt.nthreads);
+            }
+        }
+        // Set reference for CRAM if provided
+        if (opt.reference)
+        {
+            if (hts_set_fai_filename(aux->data[0], opt.reference) != 0)
+            {
+                errabort("Failed to set reference file: %s", opt.reference);
+            }
+        }
+        aux->h = sam_hdr_read(aux->data[0]);
+        if (aux->h == NULL)
+            errabort("Failed to read header from stdin");
         aux->ndata = 1;
         opt.nfiles = 0;
     }
     else
     {
-        aux->data = (bamFile *)needmem(n * sizeof(bamFile));
+        aux->data = (htsFile **)needmem(n * sizeof(htsFile *));
         opt.nfiles = n;
         opt.inputs = (char **)needmem(n * sizeof(char *));
         for (i = 0; i < n; ++i)
         {
-            bam_header_t *h_tmp;
-            // h_tmp = calloc(1, sizeof(bam_header_t));
+            sam_hdr_t *h_tmp;
             if (STREQ(argv[optind + i], "-"))
             {
-                aux->data[i] = bgzf_dopen(fileno(stdin), "r");
+                aux->data[i] = hts_open("-", "r");
                 stdin_lock = 1;
             }
             else
             {
-                aux->data[i] = bgzf_open(argv[optind + i], "r");
+                aux->data[i] = hts_open(argv[optind + i], "r");
             }
             if (aux->data[i] == NULL)
                 errabort("%s: %s", argv[optind + i], strerror(errno));
-            h_tmp = bam_header_read(aux->data[i]);
+
+            // Enable multi-threading for BAM/CRAM reading
+            if (opt.nthreads > 0)
+            {
+                if (hts_set_threads(aux->data[i], opt.nthreads) != 0)
+                {
+                    fprintf(stderr, "Warning: Failed to set %d threads for %s\n", opt.nthreads, argv[optind + i]);
+                }
+            }
+
+            // Check if CRAM and reference is needed
+            const htsFormat *fmt = hts_get_format(aux->data[i]);
+            if (fmt->format == cram)
+            {
+                if (opt.reference == NULL)
+                {
+                    errabort("CRAM file requires a reference genome. Use -T/--reference to specify.");
+                }
+                if (hts_set_fai_filename(aux->data[i], opt.reference) != 0)
+                {
+                    errabort("Failed to set reference file: %s", opt.reference);
+                }
+            }
+            else if (opt.reference)
+            {
+                // Also set reference for BAM if provided (useful for some operations)
+                hts_set_fai_filename(aux->data[i], opt.reference);
+            }
+            
+            h_tmp = sam_hdr_read(aux->data[i]);
+            if (h_tmp == NULL)
+                errabort("Failed to read header from %s", argv[optind + i]);
             if (i == 0)
                 aux->h = h_tmp;
             else
-                bam_header_destroy(h_tmp);
+                sam_hdr_destroy(h_tmp);
             opt.inputs[i] = strdup(argv[optind + i]);
         }
         aux->ndata = n;
     }
-    // FIXME: accpet more than one bam files!
+    // 多 BAM/CRAM 文件支持说明：
+    // 当前实现已支持多个 BAM/CRAM 文件输入，它们会被顺序处理并合并统计结果
+    // 注意：所有文件必须使用相同的参考基因组和排序方式
+    // 第一个文件的 header 会被用于输出
     if (export_target_bam)
     {
-        bamoutfp = bam_open(export_target_bam, "w");
+        bamoutfp = hts_open(export_target_bam, "wb");
         if (bamoutfp == NULL)
             errabort("%s : %s", export_target_bam, strerror(errno));
-        bam_header_write(bamoutfp, aux->h);
+        // Enable multi-threading for BAM writing
+        if (opt.nthreads > 0)
+        {
+            if (hts_set_threads(bamoutfp, opt.nthreads) != 0)
+            {
+                fprintf(stderr, "Warning: Failed to set %d threads for output BAM\n", opt.nthreads);
+            }
+        }
+        // Write BAM header using htslib compatible format
+        if (sam_hdr_write(bamoutfp, aux->h) < 0)
+            errabort("Failed to write header to %s", export_target_bam);
     }
     h_chrlength_init();
     header2chrhash(aux->h);
@@ -1719,7 +2338,7 @@ int bamdst(int argc, char *argv[])
     for (i = 0; i < opt.isize_lim; ++i)
         aux->c_isize->a[i] = 0;
     // aux->c_isize->m = opt.isize_lim;
-    aux->nchr = aux->h->n_targets;
+    aux->nchr = sam_hdr_nref(aux->h);
     struct bamflag fs = {};
     load_bamfiles(&opt, aux, &fs);
     print_report(&opt, aux, &fs);
@@ -1728,8 +2347,10 @@ int bamdst(int argc, char *argv[])
         freemem(opt.inputs[i]);
     freemem(opt.inputs);
     if (export_target_bam)
-        bam_close(bamoutfp);
+        hts_close(bamoutfp);
     freemem(opt.cutoffs);
+    freemem(opt.ratios);
+    freemem(opt.reference);
 freeall:
     freemem(export_target_bam);
     freemem(outdir);
@@ -1739,5 +2360,5 @@ freeall:
 /* main */
 int main(int argc, char *argv[])
 {
-    return bamdst(argc, argv);
+    return xamdst(argc, argv);
 }
