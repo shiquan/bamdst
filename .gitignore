@@ -1,0 +1,8 @@
+*.o
+*.a
+bamdst
+*.dSYM/
+*.plot
+*.report
+*.tsv.gz
+uncover.bed
