@@ -37,11 +37,12 @@ cd bamdst
 make
 ```
 
-Or via conda (thanks @xdgene):
+<!--
+A conda package is available (thanks @xdgene), but it may not be the latest version.
+Check the package version before installing.
 
-```bash
-conda install xdgene::bamdst
-```
+    conda install xdgene::bamdst
+-->
 
 ## Usage
 
