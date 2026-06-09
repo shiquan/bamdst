@@ -1,6 +1,6 @@
 //
 //  Created by shiquan on 5/18/14.
-//  Copyright (c) 2013-2024 The bamdst Authors
+//  Copyright (c) 2013-2026 The bamdst Authors
 //
 
 #include "commons.h"
