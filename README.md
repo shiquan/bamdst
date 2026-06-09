@@ -37,8 +37,7 @@ cd bamdst
 make
 ```
 
-bamdst is also hosted on conda via `xdgene::bamdst` (thanks @xdgene), but may not be
-the latest version.
+bamdst is also hosted on conda via a third-party package `xdgene::bamdst` (thanks @xdgene), but may not be the latest version.
 
 ## Usage
 
