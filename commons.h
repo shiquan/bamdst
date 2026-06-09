@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2013-2014 Beijing Genomics Institution (BGI)
+   Copyright (c) 2013-2024 The bamdst Authors
 
    Permission is hereby granted, free of charge, to any person obtaining
    a copy of this software and associated documentation files (the
