@@ -37,12 +37,8 @@ cd bamdst
 make
 ```
 
-<!--
-A conda package is available (thanks @xdgene), but it may not be the latest version.
-Check the package version before installing.
-
-    conda install xdgene::bamdst
--->
+bamdst is also hosted on conda via `xdgene::bamdst` (thanks @xdgene), but may not be
+the latest version.
 
 ## Usage
 
