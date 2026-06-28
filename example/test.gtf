@@ -1,0 +1,4 @@
+# Test GTF for MT-RNR1 region (chrM:648-1601, matches example test.bam reads)
+chrM	.	gene	648	1601	.	+	.	gene_id "MT-RNR1"; gene_name "MT-RNR1";
+chrM	.	transcript	648	1601	.	+	.	gene_id "MT-RNR1"; gene_name "MT-RNR1"; transcript_id "MT-RNR1-001";
+chrM	.	exon	648	1601	.	+	.	gene_id "MT-RNR1"; gene_name "MT-RNR1"; transcript_id "MT-RNR1-001";

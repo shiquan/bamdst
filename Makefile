@@ -1,7 +1,7 @@
 CC=		gcc
 CFLAGS=		-g -Wall -O2 
 DFLAGS=		-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DBGZF_CACHE
-LOBJS=		bgzf.o kstring.o bam_aux.o bam.o bam_import.o bam_index.o sam_header.o bedutil.o commons.o
+LOBJS=		bgzf.o kstring.o bam_aux.o bam.o bam_import.o bam_index.o sam_header.o bedutil.o commons.o number.o dict.o gtf.o
 PROG=		bamdst
 INCLUDES=	-Isamlib/ -I.
 SUBDIRS=	. samlib
@@ -23,7 +23,7 @@ libbam.a:$(LOBJS)
 		$(AR) -csru $@ $(LOBJS)
 
 bamdst:lib $(AOBJS) samlib/bam.h
-		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm -lbam -lz
+		$(CC) $(CFLAGS) -o $@ $(AOBJS) $(LDFLAGS) bamdst.c $(LIBPATH) $(INCLUDES) -lm -lbam -lz -lpthread
 
 bgzf.o:bgzf.c bgzf.h
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bgzf.c -o $@
@@ -50,7 +50,16 @@ commons.o:commons.c commons.h
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) commons.c -o $@	
 
 bedutil.o:bedutil.c bedutil.h
-		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bedutil.c -o $@	
+		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bedutil.c -o $@
+
+number.o:number.c number.h
+		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) number.c -o $@
+
+dict.o:dict.c dict.h commons.h khash.h kseq.h kstring.h
+		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) dict.c -o $@
+
+gtf.o:gtf.c gtf.h dict.h bedutil.h commons.h number.h khash.h kseq.h kstring.h ksort.h
+		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) gtf.c -o $@	
 
 clean:
 		rm -fr gmon.out *.o a.out *.exe *.dSYM  $(PROG) *~ *.a target.dep *.plot *.report *.tsv.gz uncover.bed

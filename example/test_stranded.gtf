@@ -1,0 +1,7 @@
+# Test GTF with both strands — matches example test.bam (chrM, 15 reverse-strand reads)
+chrM	.	gene	648	1601	.	+	.	gene_id "GENE-FWD"; gene_name "GENE-FWD";
+chrM	.	transcript	648	1601	.	+	.	gene_id "GENE-FWD"; transcript_id "GENE-FWD-T1";
+chrM	.	exon	648	1601	.	+	.	gene_id "GENE-FWD"; transcript_id "GENE-FWD-T1";
+chrM	.	gene	500	700	.	-	.	gene_id "GENE-REV"; gene_name "GENE-REV";
+chrM	.	transcript	500	700	.	-	.	gene_id "GENE-REV"; transcript_id "GENE-REV-T1";
+chrM	.	exon	500	700	.	-	.	gene_id "GENE-REV"; transcript_id "GENE-REV-T1";

@@ -241,12 +241,81 @@ static void regcore_merge(bedreglist_t *bed)
   bed->flag = 0;
   }
 
-static void bed_merge(regHash_t *reghash) 
+static void bed_merge(regHash_t *reghash)
   {
   khiter_t k;
   for (k = 0; k < kh_end(reghash); ++k)
     if (kh_exist(reghash, k)) regcore_merge(&kh_val(reghash, k));
   }
+
+/*
+ * Strand-aware merge: like regcore_merge but intervals on different
+ * strands are treated as non-overlapping.  If a bedreglist_t has no
+ * strand array (strand==NULL), falls back to non-stranded merge.
+ * Inspired by PISA's bed_spec_merge0(strand=1).
+ */
+static void regcore_merge_stranded(bedreglist_t *bed)
+{
+    int i, m = 0;
+    uint32_t lastbeg = 0, lastend = 0;
+    int8_t laststrand = -1;
+    if (bed->m <= 1) return;
+    sort_reg(bed);
+    uint64_t *b = (uint64_t*) needmem((bed->m + 1) * sizeof(uint64_t));
+    int8_t *bs = NULL;
+
+    int8_t have_strand = (bed->strand != NULL);
+    if (have_strand) {
+        bs = (int8_t*) needmem((bed->m + 1) * sizeof(int8_t));
+        memset(bs, -1, (bed->m + 1) * sizeof(int8_t));
+    }
+
+    for (i = 0; i < bed->m; ++i) {
+        uint32_t beg = bed->a[i] >> 32;
+        uint32_t end = (uint32_t)bed->a[i];
+        int8_t s  = have_strand ? bed->strand[i] : -1;
+
+        if (lastend < 1) {
+            lastend = end; lastbeg = beg; laststrand = s;
+            continue;
+        }
+
+        /* overlap check: adjacent (+1) and same strand (if strand-aware) */
+        if (lastend + 1 >= beg &&
+            (!have_strand || s == laststrand || s < 0 || laststrand < 0)) {
+            if (lastend < end) lastend = end;
+        } else {
+            b[m] = (uint64_t)lastbeg << 32 | lastend;
+            if (have_strand) bs[m] = laststrand;
+            m++;
+            lastbeg = beg; lastend = end; laststrand = s;
+        }
+    }
+    if (lastend > 0) {
+        b[m] = (uint64_t)lastbeg << 32 | lastend;
+        if (have_strand) bs[m] = laststrand;
+        m++;
+    }
+
+    memset(bed->a, 0, bed->m * sizeof(uint64_t));
+    memcpy(bed->a, b, m * sizeof(uint64_t));
+    bed->m = m;
+    freemem(b);
+
+    if (have_strand) {
+        memset(bed->strand, 0, bed->n * sizeof(int8_t));
+        memcpy(bed->strand, bs, m * sizeof(int8_t));
+        freemem(bs);
+    }
+    bed->flag = 0;
+}
+
+static void bed_merge_stranded(regHash_t *reghash)
+{
+    khiter_t k;
+    for (k = 0; k < kh_end(reghash); ++k)
+        if (kh_exist(reghash, k)) regcore_merge_stranded(&kh_val(reghash, k));
+}
 
 static bedreglist_t * regcore_uniq(bedreglist_t * bed1, bedreglist_t * bed2) 
   {
@@ -712,11 +781,13 @@ static bedHandle_t defaultBedHandler =
   inf_init,
   bed_read,
   bed_merge,
+  bed_merge_stranded,
   bed_uniq,
   bed_diff,
   bed_trim,
   bed_directadd,
   regcore_merge,
+  regcore_merge_stranded,
   regcore_uniq,
   regcore_diff,
   regcore_trim,

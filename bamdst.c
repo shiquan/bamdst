@@ -65,7 +65,12 @@
 #include "khash.h"
 #include "knetfile.h"
 #include "kstring.h"
+
+// GTF support (from PISA)
+#include "gtf.h"
+
 #include <sys/stat.h>
+#include <pthread.h>
 
 static char const *program_name = "bamdst";
 static char const *Version = "1.2.0";
@@ -73,6 +78,17 @@ static char const *Version = "1.2.0";
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */
 static int flank_reg = 200;
+
+/* GTF annotation support */
+static char *gtf_file = NULL;
+static int gtf_level = GTF_LEVEL_GENE;  /* GTF_LEVEL_GENE (default) or GTF_LEVEL_EXON */
+static bool gtf_enabled = FALSE;
+static bool gtf_parallel = FALSE;       /* TRUE when -p and -g both used */
+static bool gtf_stranded = FALSE;       /* TRUE when --gtf-stranded is set */
+
+/* multi-threading */
+static int n_threads = 1;               /* -@ / --threads, default 1 */
+static bool mt_prepass_done = FALSE;    /* pre-pass counted global reads */
 
 /* extern bedHand from bedutil.c, it is a collection of functions*/
 extern bedHandle_t *bedHand;
@@ -341,6 +357,19 @@ static struct depnode *bed_depnode_list(bedreglist_t *bed)
     return header;
 }
 
+/* Stranded GTF auxiliary data (forward or reverse). */
+struct gtf_strand_aux {
+    regHash_t *h_tgt;
+    regHash_t *h_flk;
+    uint64_t len;
+    unsigned nreg;
+    count32_t *c_dep;
+    count32_t *c_rmdupdep;
+    count32_t *c_reg;
+};
+
+#define GTF_S_INIT {NULL, NULL, 0, 0, NULL, NULL, NULL}
+
 struct _aux
 {
     /* nchr,  total num of chromsome
@@ -364,12 +393,27 @@ struct _aux
     regHash_t *h_tgt;
     regHash_t *h_flk;
 
+    /* GTF regions (when -g is used alongside -p, stored separately) */
+    regHash_t *h_gtf;
+    regHash_t *h_gtf_flk;
+    uint64_t gtf_len;
+    unsigned gtf_nreg;
+
     // count struct of depths, insertsize, flank depths, target regions
     count32_t *c_dep;
     count32_t *c_rmdupdep;
     count32_t *c_isize;
     count32_t *c_flkdep;
     count32_t *c_reg;
+
+    /* GTF depth histograms (non-stranded, or combined) */
+    count32_t *c_gtf_dep;
+    count32_t *c_gtf_rmdupdep;
+    count32_t *c_gtf_reg;
+
+    /* Strand-separated GTF data (when --gtf-stranded is used) */
+    struct gtf_strand_aux gtf_fwd;
+    struct gtf_strand_aux gtf_rev;
 };
 
 typedef struct _aux aux_t;
@@ -383,11 +427,19 @@ struct _aux *aux_init()
     a->h = NULL;    // bam header
     a->h_tgt = kh_init(reg);
     a->h_flk = kh_init(reg);
+    a->h_gtf = NULL;
+    a->h_gtf_flk = NULL;
     count32_init(a->c_dep);
     count32_init(a->c_rmdupdep);
     count32_init(a->c_isize);
     count32_init(a->c_flkdep);
     count32_init(a->c_reg);
+    /* GTF histograms are initialised lazily (when -g is used) */
+    a->c_gtf_dep = NULL;
+    a->c_gtf_rmdupdep = NULL;
+    a->c_gtf_reg = NULL;
+    a->gtf_fwd = (struct gtf_strand_aux)GTF_S_INIT;
+    a->gtf_rev = (struct gtf_strand_aux)GTF_S_INIT;
     return a;
 }
 
@@ -402,6 +454,8 @@ void aux_destroy(struct _aux *a)
     free(a->data);
     bedHand->destroy((void *)a->h_tgt, destroy_data);
     bedHand->destroy((void *)a->h_flk, destroy_void);
+    if (a->h_gtf)      bedHand->destroy((void *)a->h_gtf, destroy_void);
+    if (a->h_gtf_flk)  bedHand->destroy((void *)a->h_gtf_flk, destroy_void);
     bam_header_destroy(a->h);
     /* if (a->c_dep->n > 0) count_destroy(a->c_dep); */
     /* if (a->c_rmdupdep->n > 0) count_destroy(a->c_rmdupdep); */
@@ -413,6 +467,19 @@ void aux_destroy(struct _aux *a)
     count_destroy(a->c_flkdep);
     count_destroy(a->c_isize);
     count_destroy(a->c_reg);
+    if (a->c_gtf_dep)      count_destroy(a->c_gtf_dep);
+    if (a->c_gtf_rmdupdep) count_destroy(a->c_gtf_rmdupdep);
+    if (a->c_gtf_reg)      count_destroy(a->c_gtf_reg);
+    if (a->gtf_fwd.h_tgt)     bedHand->destroy((void *)a->gtf_fwd.h_tgt, destroy_void);
+    if (a->gtf_fwd.h_flk)     bedHand->destroy((void *)a->gtf_fwd.h_flk, destroy_void);
+    if (a->gtf_rev.h_tgt)     bedHand->destroy((void *)a->gtf_rev.h_tgt, destroy_void);
+    if (a->gtf_rev.h_flk)     bedHand->destroy((void *)a->gtf_rev.h_flk, destroy_void);
+    if (a->gtf_fwd.c_dep)      count_destroy(a->gtf_fwd.c_dep);
+    if (a->gtf_fwd.c_rmdupdep) count_destroy(a->gtf_fwd.c_rmdupdep);
+    if (a->gtf_fwd.c_reg)      count_destroy(a->gtf_fwd.c_reg);
+    if (a->gtf_rev.c_dep)      count_destroy(a->gtf_rev.c_dep);
+    if (a->gtf_rev.c_rmdupdep) count_destroy(a->gtf_rev.c_rmdupdep);
+    if (a->gtf_rev.c_reg)      count_destroy(a->gtf_rev.c_reg);
 
     free(a);
 }
@@ -437,6 +504,13 @@ typedef struct bamflag
     /* n_uniq was removed — see https://www.biostars.org/p/59281/ */
     uint64_t n_tgt, n_flk, n_tdata, n_fdata;
     uint64_t n_trmdat; // total rmdup bases in target regions
+    /* GTF parallel stats */
+    uint64_t n_gtf_reads, n_gtf_data;
+    uint64_t n_gtf_rmdpdat;
+    /* GTF strand-separated stats */
+    uint64_t n_gtf_fwd_reads, n_gtf_rev_reads;
+    uint64_t n_gtf_fwd_data, n_gtf_rev_data;
+    uint64_t n_gtf_fwd_rmdpdat, n_gtf_rev_rmdpdat;
 } bamflag_t;
 
 /*
@@ -526,14 +600,18 @@ USAGE : %s [OPTION] -p <probe.bed> -o <output_dir> [in1.bam [in2.bam ... ]]\n\
 ",
                Version, program_name, program_name);
         puts("\
-Option -o and -p are mandatory:\n\
+Option -o is mandatory; at least one of -p or -g is required:\n\
   -o, --outdir         output dir\n\
   -p, --bed            probe or target regions file, the region file will \n\
                        be merged before calculate depths\n\
+  -g, --gtf            GTF annotation file (gene/exon coverage)\n\
 ");
         puts("\
 Optional parameters:\n\
    -f, --flank [200]   flank n bp of each region\n\
+   --gtf-level [gene]  GTF coverage level: gene or exon (default: gene)\n\
+   --gtf-stranded      separate forward/reverse strand GTF coverage\n\
+   -@, --threads [1]   number of threads (requires .bai index)\n\
    -q [20]             map quality cutoff value, greater or equal to the value will be count\n\
    --maxdepth [0]      set the max depth to stat the cumu distribution.\n\
    --cutoffdepth [0,0] list the coverage of above these depths, allow maximal 10 cutoffs.\n\
@@ -665,6 +743,129 @@ int load_bed_init(char const *fn, aux_t *a)
     return 0;
 }
 
+/*
+ * Load GTF annotation and convert to region hashes for coverage analysis.
+ *
+ * Parses the GTF file, extracts gene or exon intervals (depending on
+ * gtf_level), converts them to 0-based regHash_t, and merges overlapping
+ * intervals.  The resulting hash is stored in a->h_gtf (and a->h_gtf_flk
+ * for flank-extended intervals).
+ *
+ * When used alongside -p (BED), GTF regions are tracked as a separate
+ * parallel target set in load_bamfiles().
+ * When used alone (no -p), GTF regions become the primary target.
+ */
+int load_gtf_init(char const *fn, aux_t *a)
+{
+    fprintf(stderr, "[bamdst] Loading GTF: %s (level=%s)\n",
+              fn, gtf_level == GTF_LEVEL_EXON ? "exon" : "gene");
+
+    struct gtf_spec *G = gtf_read_lite(fn);
+    if (G == NULL)
+        errabort("Failed to load GTF file: %s", fn);
+
+    a->h_gtf = gtf_to_regHash(G, gtf_level);
+    if (a->h_gtf == NULL)
+        errabort("No regions extracted from GTF: %s", fn);
+
+    /* merge overlapping intervals (genes may overlap on same strand,
+     * and we treat all strands together) */
+    bedHand->merge(a->h_gtf);
+
+    /* create flank-extended version */
+    a->h_gtf_flk = kh_init(reg);
+    {
+        khiter_t k;
+        for (k = 0; k != kh_end(a->h_gtf); ++k) {
+            if (kh_exist(a->h_gtf, k)) {
+                const char *chr = kh_key(a->h_gtf, k);
+                bedreglist_t *src = &kh_val(a->h_gtf, k);
+                int ret2;
+                khiter_t k2 = kh_put(reg, a->h_gtf_flk, strdup(chr), &ret2);
+                bedreglist_t *dst = &kh_val(a->h_gtf_flk, k2);
+                if (ret2) {
+                    memset(dst, 0, sizeof(bedreglist_t));
+                }
+                int i;
+                for (i = 0; i < src->m; ++i) {
+                    uint32_t beg = (uint32_t)(src->a[i] >> 32);
+                    uint32_t end = (uint32_t)src->a[i];
+                    /* extend by flank_reg on both sides, clamp to 0 */
+                    uint32_t ext_beg = beg > (uint32_t)flank_reg
+                                     ? beg - (uint32_t)flank_reg : 0;
+                    uint32_t ext_end = end + (uint32_t)flank_reg;
+                    /* push extended interval */
+                    if (dst->n == 0) {
+                        dst->n = 2;
+                        dst->a = (uint64_t *)needmem(dst->n * sizeof(uint64_t));
+                    } else if (dst->m == dst->n) {
+                        dst->n = dst->n + 1024;
+                        dst->a = (uint64_t *)
+                            enlarge_empty_mem(dst->a,
+                                dst->m * sizeof(uint64_t),
+                                dst->n * sizeof(uint64_t));
+                    }
+                    dst->a[dst->m++] = (uint64_t)ext_beg << 32
+                                     | (uint32_t)ext_end;
+                }
+            }
+        }
+        bedHand->merge(a->h_gtf_flk);
+    }
+
+    /* record GTF region statistics (non-stranded combined) */
+    {
+        inf_t *inf = bedHand->stat(a->h_gtf);
+        a->gtf_len = inf->length;
+        a->gtf_nreg = inf->total;
+        mustfree(inf);
+    }
+
+    /* init GTF depth histograms (non-stranded) */
+    count32_init(a->c_gtf_dep);
+    count32_init(a->c_gtf_rmdupdep);
+    count32_init(a->c_gtf_reg);
+
+    /* Strand-separated GTF regions */
+    if (gtf_stranded) {
+        regHash_t *h_fwd = NULL, *h_rev = NULL;
+        gtf_to_regHash_stranded(G, gtf_level, &h_fwd, &h_rev);
+
+        bedHand->merge(h_fwd);
+        bedHand->merge(h_rev);
+
+        a->gtf_fwd.h_tgt = h_fwd;
+        a->gtf_rev.h_tgt = h_rev;
+
+        inf_t *ifwd = bedHand->stat(h_fwd);
+        inf_t *irev = bedHand->stat(h_rev);
+        a->gtf_fwd.len = ifwd->length;
+        a->gtf_fwd.nreg = ifwd->total;
+        a->gtf_rev.len = irev->length;
+        a->gtf_rev.nreg = irev->total;
+        mustfree(ifwd);
+        mustfree(irev);
+
+        count32_init(a->gtf_fwd.c_dep);
+        count32_init(a->gtf_fwd.c_rmdupdep);
+        count32_init(a->gtf_fwd.c_reg);
+        count32_init(a->gtf_rev.c_dep);
+        count32_init(a->gtf_rev.c_rmdupdep);
+        count32_init(a->gtf_rev.c_reg);
+
+        fprintf(stderr, "[bamdst] GTF stranded: fwd %u regions/%" PRIu64 " bp, "
+                "rev %u regions/%" PRIu64 " bp\n",
+                a->gtf_fwd.nreg, a->gtf_fwd.len,
+                a->gtf_rev.nreg, a->gtf_rev.len);
+    }
+
+    fprintf(stderr, "[bamdst] GTF: %u regions, %" PRIu64 " bp\n",
+              a->gtf_nreg, a->gtf_len);
+
+    gtf_destroy(G);
+    return 0;
+}
+
 // this function used to add an region to the bedregion struct
 // use this struct to store the uncovered region
 int push_bedreg(bedreglist_t *bed, uint32_t begin, uint32_t end)
@@ -780,6 +981,15 @@ int readcore(struct depnode *header, bam1_t const *b, cntstat_t state)
     return 0;
 }
 
+/* Stranded GTF per-loop data. */
+struct gtf_strand_para {
+    bedreglist_t *tar;
+    struct depnode *tgt_node;
+    count32_t *depvals_of_chr;
+};
+
+#define GTF_SP_INIT {NULL, NULL, NULL}
+
 typedef struct
 {
     int tid;
@@ -791,6 +1001,13 @@ typedef struct
     char *name;
     struct depnode *tgt_node;
     struct depnode *flk_node;
+    /* GTF parallel tracking (non-stranded) */
+    bedreglist_t *gtf_tar;
+    struct depnode *gtf_tgt_node;
+    count32_t *gtf_depvals_of_chr;
+    /* GTF strand-separated tracking */
+    struct gtf_strand_para gtf_fwd;
+    struct gtf_strand_para gtf_rev;
     kstring_t *pdepths;
     kstring_t *rcov;
     BGZF *fdep; // write depth to this file
@@ -802,6 +1019,11 @@ loopbams_parameters_t *init_loopbams_parameters()
     loopbams_parameters_t *para;
     para = (loopbams_parameters_t *)needmem(sizeof(loopbams_parameters_t));
     *para = (loopbams_parameters_t){.tid = -1};
+    para->gtf_tar = NULL;
+    para->gtf_tgt_node = NULL;
+    para->gtf_depvals_of_chr = NULL;
+    para->gtf_fwd = (struct gtf_strand_para)GTF_SP_INIT;
+    para->gtf_rev = (struct gtf_strand_para)GTF_SP_INIT;
     para->pdepths = (kstring_t *)needmem(sizeof(kstring_t));
     para->rcov = (kstring_t *)needmem(sizeof(kstring_t));
     para->pdepths->l = para->pdepths->m = 0;
@@ -972,6 +1194,62 @@ int check_reachable_regions(loopbams_parameters_t *para, aux_t *a)
     return 0;
 }
 
+/*
+ * Like stat_each_region, but for GTF regions tracked in parallel.
+ * Only accumulates depth histograms (no per-base TSV for GTF).
+ */
+int stat_each_region_gtf(loopbams_parameters_t *para, aux_t *a)
+{
+    struct depnode *node = para->gtf_tgt_node;
+    if (isNull(node) || isNull(a->c_gtf_dep))
+        return 0;
+    int j;
+    if (node->len) {
+        for (j = 0; j < node->len; ++j) {
+            count_increase(a->c_gtf_dep, node->covdep[j], uint32_t);
+            count_increase(a->c_gtf_rmdupdep, node->rmdupdep[j], uint32_t);
+            if (para->gtf_depvals_of_chr)
+                count_increase(para->gtf_depvals_of_chr, node->covdep[j], uint32_t);
+        }
+    } else {
+        int length = node->stop - node->start + 1;
+        count_increaseN(a->c_gtf_dep, 0, length, uint32_t);
+        if (para->gtf_depvals_of_chr)
+            count_increaseN(para->gtf_depvals_of_chr, 0, length, uint32_t);
+    }
+    /* record region-level mean depth for GTF */
+    if (a->c_gtf_reg) {
+        float avg = node->len ? avg_cal(node->vals, node->len) : 0.0f;
+        count_increase(a->c_gtf_reg, (int)avg, uint32_t);
+    }
+    return 0;
+}
+
+/*
+ * Accumulate depth from a depnode into a gtf_strand_aux histogram set.
+ * Node is passed explicitly (fwd or rev), stats go into 'gs'.
+ */
+static int gtf_s_depnode_stat(struct depnode *node, struct gtf_strand_aux *gs)
+{
+    if (isNull(node) || isNull(gs->c_dep))
+        return 0;
+    int j;
+    if (node->len) {
+        for (j = 0; j < node->len; ++j) {
+            count_increase(gs->c_dep, node->covdep[j], uint32_t);
+            count_increase(gs->c_rmdupdep, node->rmdupdep[j], uint32_t);
+        }
+    } else {
+        int length = node->stop - node->start + 1;
+        count_increaseN(gs->c_dep, 0, length, uint32_t);
+    }
+    if (gs->c_reg && node->len) {
+        float avg = avg_cal(node->vals, node->len);
+        count_increase(gs->c_reg, (int)avg, uint32_t);
+    }
+    return 0;
+}
+
 int stat_flk_depcnt(loopbams_parameters_t *para, aux_t *a)
 {
     int j;
@@ -990,6 +1268,328 @@ void write_unover_file()
     bedHand->save("uncover.bed", h_uncov);
     bedHand->destroy(h_uncov, destroy_data);
 }
+
+/* ================================================================
+ * Multi-threading support
+ * ================================================================ */
+
+/* Merge count32_t histogram. */
+static void mt_count_merge(count32_t *dst, count32_t *src)
+{
+    if (!src || src->m == 0) return;
+    int i, max_m = dst->m > src->m ? dst->m : src->m;
+    count_resize(dst, max_m, uint32_t);
+    for (i = 0; i < src->m; ++i) dst->a[i] += src->a[i];
+    if (src->m > dst->m) dst->m = src->m;
+}
+
+/* Merge bamflag_t: only target-specific fields (global counts come from pre-pass). */
+static void mt_flag_merge(bamflag_t *dst, const bamflag_t *src)
+{
+    if (mt_prepass_done) {
+        dst->n_tgt        += src->n_tgt;
+        dst->n_flk        += src->n_flk;
+        dst->n_tdata      += src->n_tdata;
+        dst->n_fdata      += src->n_fdata;
+        dst->n_trmdat     += src->n_trmdat;
+        dst->n_gtf_reads  += src->n_gtf_reads;
+        dst->n_gtf_data   += src->n_gtf_data;
+        dst->n_gtf_rmdpdat += src->n_gtf_rmdpdat;
+        return;
+    }
+    dst->n_reads      += src->n_reads;
+    dst->n_mapped     += src->n_mapped;
+    dst->n_pair_map   += src->n_pair_map;
+    dst->n_pair_all   += src->n_pair_all;
+    dst->n_pair_good  += src->n_pair_good;
+    dst->n_sgltn      += src->n_sgltn;
+    dst->n_read1      += src->n_read1;
+    dst->n_read2      += src->n_read2;
+    dst->n_dup        += src->n_dup;
+    dst->n_rmdup1     += src->n_rmdup1;
+    dst->n_rmdup2     += src->n_rmdup2;
+    dst->n_diffchr    += src->n_diffchr;
+    dst->n_pstrand    += src->n_pstrand;
+    dst->n_mstrand    += src->n_mstrand;
+    dst->n_qcfail     += src->n_qcfail;
+    dst->n_data       += src->n_data;
+    dst->n_mdata      += src->n_mdata;
+    dst->n_qual       += src->n_qual;
+    dst->n_tgt        += src->n_tgt;
+    dst->n_flk        += src->n_flk;
+    dst->n_tdata      += src->n_tdata;
+    dst->n_fdata      += src->n_fdata;
+    dst->n_trmdat     += src->n_trmdat;
+    dst->n_gtf_reads  += src->n_gtf_reads;
+    dst->n_gtf_data   += src->n_gtf_data;
+    dst->n_gtf_rmdpdat += src->n_gtf_rmdpdat;
+}
+
+/* ---- per-thread context ---- */
+struct mt_ctx {
+    pthread_t handle;
+    int tid;
+    const char *bam_path;
+    const bam_header_t *hdr;
+    regHash_t *h_tgt, *h_flk, *h_gtf;
+    int8_t *chrom_mask;
+    int n_chrom_total, mapQ_lim, isize_lim;
+
+    /* results */
+    count32_t *c_dep, *c_rmdupdep, *c_isize, *c_flkdep, *c_reg;
+    bamflag_t fs;
+    count32_t *c_gtf_dep, *c_gtf_rmdupdep;
+};
+
+/* ---- simplified depth stat (no BGZF output, just histogram) ---- */
+static void mts_stat_region(struct depnode *node,
+    count32_t *c_dep, count32_t *c_rmdupdep,
+    count32_t *c_reg, count32_t *depvals_chr)
+{
+    int j;
+    if (node->len) {
+        for (j = 0; j < node->len; ++j) {
+            count_increase(c_dep, node->covdep[j], uint32_t);
+            count_increase(c_rmdupdep, node->rmdupdep[j], uint32_t);
+            if (depvals_chr)
+                count_increase(depvals_chr, node->covdep[j], uint32_t);
+        }
+        count_increase(c_reg, (int)avg_cal(node->vals, node->len), uint32_t);
+    } else {
+        int len = node->stop - node->start + 1;
+        count_increaseN(c_dep, 0, len, uint32_t);
+        if (depvals_chr)
+            count_increaseN(depvals_chr, 0, len, uint32_t);
+    }
+}
+static void mts_stat_flk(struct depnode *node, count32_t *c_flkdep)
+{
+    int j;
+    for (j = 0; j < node->len; ++j)
+        count_increase(c_flkdep, node->vals[j], uint32_t);
+}
+static void mts_stat_gtf(struct depnode *node,
+    count32_t *c_dep, count32_t *c_rmdupdep)
+{
+    int j;
+    if (node->len) {
+        for (j = 0; j < node->len; ++j) {
+            count_increase(c_dep, node->covdep[j], uint32_t);
+            count_increase(c_rmdupdep, node->rmdupdep[j], uint32_t);
+        }
+    } else {
+        int len = node->stop - node->start + 1;
+        count_increaseN(c_dep, 0, len, uint32_t);
+    }
+}
+
+/* ---- thread worker: sequential BAM scan with chromosome mask ---- */
+static void *mt_worker(void *arg)
+{
+    struct mt_ctx *ctx = (struct mt_ctx *)arg;
+    if (!ctx->bam_path) return NULL;
+
+    bamFile fp = bam_open(ctx->bam_path, "r");
+    if (!fp) {
+        warnings("[thread %d] cannot open %s", ctx->tid, ctx->bam_path);
+        return NULL;
+    }
+
+    count32_init(ctx->c_dep); count32_init(ctx->c_rmdupdep);
+    count32_init(ctx->c_isize); count32_init(ctx->c_flkdep);
+    count32_init(ctx->c_reg);
+    memset(&ctx->fs, 0, sizeof(bamflag_t));
+    if (ctx->h_gtf) {
+        count32_init(ctx->c_gtf_dep);
+        count32_init(ctx->c_gtf_rmdupdep);
+    }
+
+    struct depnode *tgt_node = NULL, *flk_node = NULL, *gtf_node = NULL;
+    count32_t *depvals_chr = NULL;
+    bedreglist_t *tar = NULL;
+    int cur_tid = -1;
+
+    bam1_t *b = (bam1_t *)needmem(sizeof(bam1_t));
+
+    while (bam_read1(fp, b) >= 0) {
+        bam1_core_t *c = &b->core;
+        if (c->flag & BAM_FSECONDARY || c->flag & BAM_FSUPPLEMENTARY)
+            continue;
+
+        int sf;
+        flagstat(&ctx->fs, c, sf);
+        if (c->qual >= ctx->mapQ_lim) ctx->fs.n_qual++;
+        if (c->tid == -1 || sf == -3) continue;
+
+        cntstat_t state = CMATCH;
+        if (sf == 2) state = CDUP;
+        else if (c->qual < ctx->mapQ_lim) state = CLOWQ;
+        if (sf == 1) {
+            if (c->flag & BAM_FREAD1) ctx->fs.n_rmdup1++;
+            if (c->flag & BAM_FREAD2) ctx->fs.n_rmdup2++;
+        }
+        if (c->isize > 0 && c->isize < ctx->isize_lim)
+            count_increase(ctx->c_isize, c->isize, uint32_t);
+
+        /* Chromosome transition */
+        if (c->tid != cur_tid) {
+            while (tgt_node) {
+                mts_stat_region(tgt_node, ctx->c_dep, ctx->c_rmdupdep,
+                                ctx->c_reg, depvals_chr);
+                del_node(tgt_node);
+            }
+            while (flk_node) { mts_stat_flk(flk_node, ctx->c_flkdep); del_node(flk_node); }
+            while (gtf_node) { mts_stat_gtf(gtf_node, ctx->c_gtf_dep, ctx->c_gtf_rmdupdep); del_node(gtf_node); }
+
+            cur_tid = c->tid;
+            tgt_node = NULL; flk_node = NULL; gtf_node = NULL;
+            tar = NULL; depvals_chr = NULL;
+
+            if (cur_tid >= ctx->n_chrom_total || !ctx->chrom_mask[cur_tid])
+                continue;
+
+            const char *chr_name = ctx->hdr->target_name[cur_tid];
+            khiter_t k = kh_get(reg, ctx->h_tgt, chr_name);
+            if (k == kh_end(ctx->h_tgt)) continue;
+
+            tar = &kh_val(ctx->h_tgt, k);
+            tgt_node = bed_depnode_list(tar);
+            count32_init(depvals_chr);
+            tar->data = (void *)depvals_chr;
+
+            k = kh_get(reg, ctx->h_flk, chr_name);
+            if (k != kh_end(ctx->h_flk))
+                flk_node = bed_depnode_list(&kh_val(ctx->h_flk, k));
+
+            if (ctx->h_gtf) {
+                k = kh_get(reg, ctx->h_gtf, chr_name);
+                if (k != kh_end(ctx->h_gtf))
+                    gtf_node = bed_depnode_list(&kh_val(ctx->h_gtf, k));
+            }
+        }
+
+        if (!tgt_node) continue;
+
+        /* flank */
+        while (flk_node && flk_node->stop < c->pos + 1) {
+            mts_stat_flk(flk_node, ctx->c_flkdep); del_node(flk_node);
+        }
+        if (flk_node && readcore(flk_node, b, state)) ctx->fs.n_flk++;
+
+        /* target */
+        while (tgt_node && tgt_node->stop < c->pos + 1) {
+            mts_stat_region(tgt_node, ctx->c_dep, ctx->c_rmdupdep,
+                            ctx->c_reg, depvals_chr);
+            del_node(tgt_node);
+            if (tgt_node && isZero(tgt_node->len)) depnode_init(tgt_node);
+        }
+        if (tgt_node && readcore(tgt_node, b, state)) ctx->fs.n_tgt++;
+
+        /* GTF */
+        while (gtf_node && gtf_node->stop < c->pos + 1) {
+            mts_stat_gtf(gtf_node, ctx->c_gtf_dep, ctx->c_gtf_rmdupdep);
+            del_node(gtf_node);
+            if (gtf_node && isZero(gtf_node->len)) depnode_init(gtf_node);
+        }
+        if (gtf_node && readcore(gtf_node, b, state)) ctx->fs.n_gtf_reads++;
+    }
+
+    /* finalize last chromosome */
+    while (tgt_node) {
+        mts_stat_region(tgt_node, ctx->c_dep, ctx->c_rmdupdep,
+                        ctx->c_reg, depvals_chr);
+        del_node(tgt_node);
+    }
+    while (flk_node) { mts_stat_flk(flk_node, ctx->c_flkdep); del_node(flk_node); }
+    while (gtf_node) { mts_stat_gtf(gtf_node, ctx->c_gtf_dep, ctx->c_gtf_rmdupdep); del_node(gtf_node); }
+
+    bam_destroy1(b);
+    bgzf_close(fp);
+    return NULL;
+}
+
+/* ---- chromosome partitioning (largest-first bin packing) ---- */
+static int8_t **mt_partition(const bam_header_t *hdr, regHash_t *h_tgt)
+{
+    int n_chr = hdr->n_targets, i, t;
+    int8_t **mask = malloc(n_threads * sizeof(int8_t *));
+    for (t = 0; t < n_threads; ++t) mask[t] = calloc(n_chr, sizeof(int8_t));
+
+    uint64_t *sz = calloc(n_chr, sizeof(uint64_t));
+    for (i = 0; i < n_chr; ++i) {
+        khiter_t k = kh_get(reg, h_tgt, hdr->target_name[i]);
+        if (k != kh_end(h_tgt)) {
+            bedreglist_t *ta = &kh_val(h_tgt, k);
+            int j;
+            for (j = 0; j < ta->m; ++j)
+                sz[i] += ((uint32_t)ta->a[j]) - (ta->a[j] >> 32);
+        }
+    }
+    uint64_t *ld = calloc(n_threads, sizeof(uint64_t));
+    for (i = 0; i < n_chr; ++i) {
+        if (!sz[i]) continue;
+        int best = 0;
+        for (t = 1; t < n_threads; ++t) if (ld[t] < ld[best]) best = t;
+        mask[best][i] = 1; ld[best] += sz[i];
+    }
+    free(sz); free(ld);
+    return mask;
+}
+
+/*
+ * load_bamfiles_mt — multi-threaded dispatch.
+ * Partitions chromosomes, spawns workers, merges results.
+ * Pre-pass MUST have been called first (sets mt_prepass_done).
+ */
+static int load_bamfiles_mt(struct opt_aux *f, aux_t *a, bamflag_t *fs,
+                             const bam_index_t *bai)
+{
+    (void)bai; /* BAI presence validated by caller; workers scan sequentially */
+    int t;
+    int8_t **mask = mt_partition(a->h, a->h_tgt);
+    struct mt_ctx *ctx = calloc(n_threads, sizeof(struct mt_ctx));
+
+    for (t = 0; t < n_threads; ++t) {
+        ctx[t].tid = t;
+        ctx[t].bam_path = f->nfiles > 0 ? f->inputs[0] : NULL;
+        ctx[t].hdr = a->h;
+        ctx[t].h_tgt = a->h_tgt; ctx[t].h_flk = a->h_flk;
+        ctx[t].h_gtf = a->h_gtf;
+        ctx[t].chrom_mask = mask[t];
+        ctx[t].n_chrom_total = a->h->n_targets;
+        ctx[t].mapQ_lim = f->mapQ_lim;
+        ctx[t].isize_lim = f->isize_lim;
+        pthread_create(&ctx[t].handle, NULL, mt_worker, &ctx[t]);
+    }
+    for (t = 0; t < n_threads; ++t) {
+        pthread_join(ctx[t].handle, NULL);
+        if (ctx[t].c_dep)      { mt_count_merge(a->c_dep, ctx[t].c_dep);
+                                 count_destroy(ctx[t].c_dep); }
+        if (ctx[t].c_rmdupdep) { mt_count_merge(a->c_rmdupdep, ctx[t].c_rmdupdep);
+                                 count_destroy(ctx[t].c_rmdupdep); }
+        if (ctx[t].c_isize)    { mt_count_merge(a->c_isize, ctx[t].c_isize);
+                                 count_destroy(ctx[t].c_isize); }
+        if (ctx[t].c_flkdep)   { mt_count_merge(a->c_flkdep, ctx[t].c_flkdep);
+                                 count_destroy(ctx[t].c_flkdep); }
+        if (ctx[t].c_reg)      { mt_count_merge(a->c_reg, ctx[t].c_reg);
+                                 count_destroy(ctx[t].c_reg); }
+        mt_flag_merge(fs, &ctx[t].fs);
+        if (ctx[t].c_gtf_dep && a->c_gtf_dep) {
+            mt_count_merge(a->c_gtf_dep, ctx[t].c_gtf_dep);
+            count_destroy(ctx[t].c_gtf_dep);
+        }
+        if (ctx[t].c_gtf_rmdupdep && a->c_gtf_rmdupdep) {
+            mt_count_merge(a->c_gtf_rmdupdep, ctx[t].c_gtf_rmdupdep);
+            count_destroy(ctx[t].c_gtf_rmdupdep);
+        }
+    }
+    for (t = 0; t < n_threads; ++t) free(mask[t]);
+    free(mask); free(ctx);
+    return 0;
+}
+
+/* ---- end multi-threading support ---- */
+
 
 /*
  * Core processing loop: iterate through all BAM reads and accumulate depth
@@ -1125,6 +1725,30 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                     }
                 }
 
+                /* GTF parallel cleanup */
+                if (para->gtf_tgt_node && para->tid >= 0 && a->h_gtf)
+                {
+                    while (para->gtf_tgt_node)
+                    {
+                        stat_each_region_gtf(para, a);
+                        del_node(para->gtf_tgt_node);
+                    }
+                }
+
+                /* GTF stranded cleanup */
+                if (gtf_stranded && para->tid >= 0) {
+                    while (para->gtf_fwd.tgt_node) {
+                        gtf_s_depnode_stat(para->gtf_fwd.tgt_node,
+                                           &a->gtf_fwd);
+                        del_node(para->gtf_fwd.tgt_node);
+                    }
+                    while (para->gtf_rev.tgt_node) {
+                        gtf_s_depnode_stat(para->gtf_rev.tgt_node,
+                                           &a->gtf_rev);
+                        del_node(para->gtf_rev.tgt_node);
+                    }
+                }
+
                 para->tid = c->tid;
                 para->name = h->target_name[c->tid];
 
@@ -1161,6 +1785,44 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                 para->flk_node = bed_depnode_list(para->flk);
                 para->tar->flag = para->flk->flag = 1;
 
+                /* GTF parallel: init GTF depnodes for this chromosome */
+                if (a->h_gtf) {
+                    k = kh_get(reg, a->h_gtf, para->name);
+                    if (k != kh_end(a->h_gtf)) {
+                        para->gtf_tar = &kh_val(a->h_gtf, k);
+                        count32_t *gtf_tmp;
+                        count32_init(gtf_tmp);
+                        para->gtf_depvals_of_chr = gtf_tmp;
+                        para->gtf_tar->data = (void *)para->gtf_depvals_of_chr;
+                        para->gtf_tgt_node = bed_depnode_list(para->gtf_tar);
+                    } else {
+                        para->gtf_tar = NULL;
+                        para->gtf_tgt_node = NULL;
+                        para->gtf_depvals_of_chr = NULL;
+                    }
+                }
+
+                /* GTF stranded: init fwd/rev depnodes */
+                if (gtf_stranded) {
+                    khiter_t kf, kr;
+                    kf = kh_get(reg, a->gtf_fwd.h_tgt, para->name);
+                    if (kf != kh_end(a->gtf_fwd.h_tgt)) {
+                        para->gtf_fwd.tar = &kh_val(a->gtf_fwd.h_tgt, kf);
+                        para->gtf_fwd.tgt_node = bed_depnode_list(para->gtf_fwd.tar);
+                    } else {
+                        para->gtf_fwd.tar = NULL;
+                        para->gtf_fwd.tgt_node = NULL;
+                    }
+                    kr = kh_get(reg, a->gtf_rev.h_tgt, para->name);
+                    if (kr != kh_end(a->gtf_rev.h_tgt)) {
+                        para->gtf_rev.tar = &kh_val(a->gtf_rev.h_tgt, kr);
+                        para->gtf_rev.tgt_node = bed_depnode_list(para->gtf_rev.tar);
+                    } else {
+                        para->gtf_rev.tar = NULL;
+                        para->gtf_rev.tgt_node = NULL;
+                    }
+                }
+
                 /* the next part is init uncover region hash*/
                 k = kh_put(reg, h_uncov, strdup(para->name), &ret);
 
@@ -1191,6 +1853,53 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
                 fs->n_tgt++;
             }
 
+            /* GTF parallel: advance and count GTF depnodes */
+            while (para->gtf_tgt_node &&
+                   para->gtf_tgt_node->stop < para->lstpos + 1)
+            {
+                stat_each_region_gtf(para, a);
+                del_node(para->gtf_tgt_node);
+                if (para->gtf_tgt_node &&
+                    isZero(para->gtf_tgt_node->len))
+                    depnode_init(para->gtf_tgt_node);
+            }
+            if (para->gtf_tgt_node &&
+                readcore(para->gtf_tgt_node, b, state))
+            {
+                fs->n_gtf_reads++;
+            }
+
+            /* GTF stranded: count by read strand */
+            if (gtf_stranded) {
+                int read_strand = (c->flag & BAM_FREVERSE) ? 1 : 0;
+                struct depnode **gtf_node = read_strand
+                    ? &para->gtf_rev.tgt_node
+                    : &para->gtf_fwd.tgt_node;
+                struct gtf_strand_aux *gs = read_strand
+                    ? &a->gtf_rev : &a->gtf_fwd;
+
+                while (*gtf_node &&
+                       (*gtf_node)->stop < para->lstpos + 1)
+                {
+                    struct depnode *cur = *gtf_node;
+                    gtf_s_depnode_stat(cur, gs);
+                    *gtf_node = cur->next;
+                    freemem(cur->vals);
+                    freemem(cur->cnts);
+                    freemem(cur->rmdupdep);
+                    freemem(cur->covdep);
+                    freemem(cur);
+                    if (*gtf_node && isZero((*gtf_node)->len))
+                        depnode_init(*gtf_node);
+                }
+                if (*gtf_node && readcore(*gtf_node, b, state)) {
+                    if (read_strand)
+                        fs->n_gtf_rev_reads++;
+                    else
+                        fs->n_gtf_fwd_reads++;
+                }
+            }
+
             // endcore:
         }
         bam_destroy1(b);
@@ -1205,6 +1914,21 @@ int load_bamfiles(struct opt_aux *f, aux_t *a, bamflag_t *fs)
     {
         count_increaseN(a->c_flkdep, 0, para->flk_node->len, uint32_t);
         del_node(para->flk_node); // no need allocate memory for these nodes
+    }
+    /* GTF parallel cleanup */
+    while (para->gtf_tgt_node)
+    {
+        stat_each_region_gtf(para, a);
+        del_node(para->gtf_tgt_node);
+    }
+    /* GTF stranded cleanup */
+    while (para->gtf_fwd.tgt_node) {
+        gtf_s_depnode_stat(para->gtf_fwd.tgt_node, &a->gtf_fwd);
+        del_node(para->gtf_fwd.tgt_node);
+    }
+    while (para->gtf_rev.tgt_node) {
+        gtf_s_depnode_stat(para->gtf_rev.tgt_node, &a->gtf_rev);
+        del_node(para->gtf_rev.tgt_node);
     }
     check_reachable_regions(para, a);
     write_unover_file();
@@ -1665,11 +2389,11 @@ static void write_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
     fprintf(fp, "  \"program\": \"%s\",\n", program_name);
     fprintf(fp, "  \"version\": \"%s\",\n", Version);
     fprintf(fp, "  \"input_files\": [");
-    first = true;
+    first = TRUE;
     for (i = 0; i < f->nfiles; ++i) {
         if (!first) fprintf(fp, ", ");
         fprintf(fp, "\"%s\"", f->inputs[i]);
-        first = false;
+        first = FALSE;
     }
     fprintf(fp, "],\n");
 
@@ -1800,7 +2524,7 @@ static void write_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
 
     /* chromosomes */
     fprintf(fp, "  \"chromosomes\": [\n");
-    first = true;
+    first = TRUE;
     khiter_t k;
     for (k = 0; k != kh_end(a->h_tgt); ++k) {
         if (kh_exist(a->h_tgt, k)) {
@@ -1836,7 +2560,7 @@ static void write_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
                 }
             }
             fprintf(fp, "}");
-            first = false;
+            first = FALSE;
             free(chrcov);
         }
     }
@@ -1844,7 +2568,7 @@ static void write_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
 
     /* depth distribution */
     fprintf(fp, "  \"depth_distribution\": [\n");
-    first = true;
+    first = TRUE;
     uint64_t dcnt = 0, dcumu;
     for (i = 0; i < a->c_dep->m; ++i) dcnt += a->c_dep->a[i];
     dcumu = dcnt;
@@ -1855,13 +2579,13 @@ static void write_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
                 ", \"cumulative_count\": %" PRIu64 ", \"cumulative_fraction\": %.6f}",
                 i, a->c_dep->a[i], (float)a->c_dep->a[i] / dcnt,
                 dcumu, (float)dcumu / dcnt);
-        first = false;
+        first = FALSE;
     }
     fprintf(fp, "\n  ],\n");
 
     /* insert size distribution */
     fprintf(fp, "  \"insert_size_distribution\": [\n");
-    first = true;
+    first = TRUE;
     uint64_t icnt = 0, icumu;
     for (i = 0; i < a->c_isize->m; ++i) icnt += a->c_isize->a[i];
     icumu = icnt;
@@ -1872,7 +2596,7 @@ static void write_report_json(struct opt_aux *f, aux_t *a, bamflag_t *fs,
                 ", \"cumulative_count\": %" PRIu64 ", \"cumulative_fraction\": %.6f}",
                 i, a->c_isize->a[i], (float)a->c_isize->a[i] / icnt,
                 icumu, (float)icumu / icnt);
-        first = false;
+        first = FALSE;
     }
     fprintf(fp, "\n  ]\n");
 
@@ -2116,6 +2840,167 @@ int print_report(struct opt_aux *f, aux_t *a, bamflag_t *fs)
         }
     }
 
+    /* ====== GTF section (only when -p and -g used together) ====== */
+    if (gtf_parallel && a->c_gtf_dep && a->c_gtf_dep->m > 0) {
+        const char *gtf_tag = gtf_level == GTF_LEVEL_EXON
+                            ? "[GTF Exon]" : "[GTF Gene]";
+
+        /* Compute GTF coverage stats */
+        uint64_t gtf_tdata = 0;
+        struct regcov *gtfcov = regcov_init();
+        cntcov_cal2(f, gtfcov, a->c_gtf_dep, &gtf_tdata, a->gtf_len);
+        fs->n_gtf_data = gtf_tdata;
+
+        /* GTF rmdup */
+        for (int i = 0; i < a->c_gtf_rmdupdep->m; ++i)
+            fs->n_gtf_rmdpdat += a->c_gtf_rmdupdep->a[i] * i;
+        cntcov_cal_rmdup(f, gtfcov, a->c_gtf_rmdupdep);
+
+        /* GTF ratio coverage */
+        cntcov_cal_ratio(f, gtfcov, a->c_gtf_dep, a->gtf_len);
+
+        /* GTF region-level stats */
+        uint64_t gtf_rdat = 0;
+        struct regcov *gtfregcov = regcov_init();
+        if (a->c_gtf_reg)
+            cntcov_cal(f, gtfregcov, a->c_gtf_reg, &gtf_rdat);
+
+        char buf[60];
+        sprintf(buf, "%s Reads", gtf_tag);
+        FMT_KV_U64(fc, buf, fs->n_gtf_reads);
+        sprintf(buf, "%s Fraction of Reads in all reads", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%",
+                     (float)fs->n_gtf_reads / fs->n_reads * 100);
+        sprintf(buf, "%s Fraction of Reads in mapped reads", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%",
+                     (float)fs->n_gtf_reads / fs->n_mapped * 100);
+        sprintf(buf, "%s Data(Mb)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f",
+                     (float)fs->n_gtf_data / 1e6);
+        sprintf(buf, "%s Len of region", gtf_tag);
+        FMT_KV_U64(fc, buf, a->gtf_len);
+        sprintf(buf, "%s Average depth", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f",
+                     a->gtf_len > 0
+                     ? (float)fs->n_gtf_data / a->gtf_len : 0.0f);
+        sprintf(buf, "%s Average depth(rmdup)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f",
+                     a->gtf_len > 0
+                     ? (float)fs->n_gtf_rmdpdat / a->gtf_len : 0.0f);
+        sprintf(buf, "%s Coverage (>0.2*(Avg)x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov02x);
+        sprintf(buf, "%s Coverage (>0.5*(Avg)x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov05x);
+        sprintf(buf, "%s Coverage (>0x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov);
+        sprintf(buf, "%s Coverage (>=4x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov4);
+        sprintf(buf, "%s Coverage (>=10x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov10);
+        sprintf(buf, "%s Coverage (>=30x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov30);
+        sprintf(buf, "%s Coverage (>=100x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov100);
+        if (f->cutoff) {
+            for (int x = 0; x < f->num_cutoffs; x++) {
+                sprintf(buf, "%s Coverage (>=%ux)", gtf_tag, f->cutoffs[x]);
+                FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov_array[x]);
+            }
+        }
+        /* GTF rmdup coverage */
+        sprintf(buf, "%s Coverage(rmdup) (>0x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov_rmdup);
+        sprintf(buf, "%s Coverage(rmdup) (>=4x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov4_rmdup);
+        sprintf(buf, "%s Coverage(rmdup) (>=10x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov10_rmdup);
+        sprintf(buf, "%s Coverage(rmdup) (>=30x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov30_rmdup);
+        sprintf(buf, "%s Coverage(rmdup) (>=100x)", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov100_rmdup);
+        /* GTF ratio coverage */
+        if (f->depth_ratio && f->num_ratios > 0) {
+            for (int r = 0; r < f->num_ratios; r++) {
+                sprintf(buf, "%s Coverage (>%.2f*Avg)", gtf_tag, f->ratios[r]);
+                FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfcov->cov_ratio[r]);
+            }
+        }
+        /* GTF region-level */
+        sprintf(buf, "%s Region Count", gtf_tag);
+        FMT_KV_INT(fc, buf, a->gtf_nreg);
+        sprintf(buf, "%s Region covered > 0x", gtf_tag);
+        FMT_KV_U64(fc, buf, gtfregcov->cnt);
+        sprintf(buf, "%s Fraction Region covered > 0x", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfregcov->cov);
+        sprintf(buf, "%s Fraction Region covered >= 4x", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfregcov->cov4);
+        sprintf(buf, "%s Fraction Region covered >= 10x", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfregcov->cov10);
+        sprintf(buf, "%s Fraction Region covered >= 30x", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfregcov->cov30);
+        sprintf(buf, "%s Fraction Region covered >= 100x", gtf_tag);
+        FMT_KV_FLOAT(fc, buf, "%.2f%%", gtfregcov->cov100);
+
+        mustfree(gtfcov);
+        mustfree(gtfregcov);
+    }
+
+    /* ====== GTF Stranded sections (--gtf-stranded) ====== */
+    if (gtf_stranded && a->gtf_fwd.c_dep && a->gtf_fwd.c_dep->m > 0) {
+
+        const char *strand_tags[2] = {"[GTF Gene Forward]",
+                                       "[GTF Gene Reverse]"};
+        struct gtf_strand_aux *gs[2] = {&a->gtf_fwd, &a->gtf_rev};
+        uint64_t *n_reads[2]  = {&fs->n_gtf_fwd_reads, &fs->n_gtf_rev_reads};
+
+        for (int si = 0; si < 2; si++) {
+            const char *tag = strand_tags[si];
+            struct gtf_strand_aux *g = gs[si];
+
+            if (!g->c_dep || g->c_dep->m == 0) continue;
+
+            uint64_t gdata = 0;
+            struct regcov *gc = regcov_init();
+            cntcov_cal2(f, gc, g->c_dep, &gdata, g->len);
+            *n_reads[si] = (*n_reads[si] > 0) ? *n_reads[si] : 0;
+
+            cntcov_cal_rmdup(f, gc, g->c_rmdupdep);
+            cntcov_cal_ratio(f, gc, g->c_dep, g->len);
+
+            uint64_t grdat = 0;
+            struct regcov *grc = regcov_init();
+            if (g->c_reg) cntcov_cal(f, grc, g->c_reg, &grdat);
+
+            char buf[80];
+            sprintf(buf, "%s Reads", tag);
+            FMT_KV_U64(fc, buf, *n_reads[si]);
+            sprintf(buf, "%s Len of region", tag);
+            FMT_KV_U64(fc, buf, g->len);
+            sprintf(buf, "%s Average depth", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f",
+                         g->len > 0 ? (float)gdata / g->len : 0.0f);
+            sprintf(buf, "%s Coverage (>0x)", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f%%", gc->cov);
+            sprintf(buf, "%s Coverage (>=4x)", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f%%", gc->cov4);
+            sprintf(buf, "%s Coverage (>=10x)", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f%%", gc->cov10);
+            sprintf(buf, "%s Coverage (>=30x)", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f%%", gc->cov30);
+            sprintf(buf, "%s Coverage (>=100x)", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f%%", gc->cov100);
+            sprintf(buf, "%s Coverage(rmdup) (>0x)", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f%%", gc->cov_rmdup);
+            sprintf(buf, "%s Coverage(rmdup) (>=10x)", tag);
+            FMT_KV_FLOAT(fc, buf, "%.2f%%", gc->cov10_rmdup);
+            sprintf(buf, "%s Region Count", tag);
+            FMT_KV_INT(fc, buf, g->nreg);
+
+            mustfree(gc);
+            mustfree(grc);
+        }
+    }
+
     fclose(fc);
     mustfree(tarcov);
     mustfree(regcov);
@@ -2132,11 +3017,17 @@ enum
     BAMOUT,
     FORMAT_OPT,
     DEPTHRATIO,
+    GTFLEVEL,
+    GTFSTRANDED,
+    NTHREADS,
     HELP
 };
 
 static struct option const long_opts[] = {{"outdir", required_argument, NULL, 'o'},
                                           {"bed", required_argument, NULL, 'p'},
+                                          {"gtf", required_argument, NULL, 'g'},
+                                          {"gtf-level", required_argument, NULL, GTFLEVEL},
+                                          {"gtf-stranded", no_argument, NULL, GTFSTRANDED},
                                           {"flank", required_argument, NULL, 'f'},
                                           {"maxdepth", required_argument, NULL, MAXDEPTH},
                                           {"cutoffdepth", required_argument, NULL, CUTOFF},
@@ -2147,6 +3038,7 @@ static struct option const long_opts[] = {{"outdir", required_argument, NULL, 'o
                                           {"format", required_argument, NULL, FORMAT_OPT},
                                           {"depthratio", required_argument, NULL, DEPTHRATIO},
                                           //{"rmdup", no_argument, NULL, 'd'},
+                                          {"threads", required_argument, NULL, NTHREADS},
                                           {"help", no_argument, NULL, 'h'},
                                           {"version", no_argument, NULL, 'v'}};
 
@@ -2162,7 +3054,7 @@ int bamdst(int argc, char *argv[])
 
     // struct opt_aux opt = {.inputs = NULL, .isize_lim = 2000, .mapQ_lim = 20};
     struct opt_aux opt = init_opt_aux();
-    while ((n = getopt_long(argc, argv, "o:p:f:q:F:h1v", long_opts, NULL)) >= 0)
+    while ((n = getopt_long(argc, argv, "o:p:g:f:q:F:h1v@:", long_opts, NULL)) >= 0)
     {
         switch (n)
         {
@@ -2173,6 +3065,24 @@ int bamdst(int argc, char *argv[])
         // capture region or just the region you interesting
         case 'p':
             probe = strdup(optarg);
+            break;
+        // GTF annotation file for gene/exon coverage
+        case 'g':
+            gtf_file = strdup(optarg);
+            gtf_enabled = TRUE;
+            break;
+        case GTFLEVEL:
+            if (strcmp(optarg, "exon") == 0)
+                gtf_level = GTF_LEVEL_EXON;
+            else if (strcmp(optarg, "gene") == 0)
+                gtf_level = GTF_LEVEL_GENE;
+            else {
+                fprintf(stderr, "Unknown --gtf-level '%s'. Valid: gene, exon\n", optarg);
+                usage(0);
+            }
+            break;
+        case GTFSTRANDED:
+            gtf_stranded = TRUE;
             break;
         // flk the region for more information, default is 200 bp
         case 'f':
@@ -2252,6 +3162,11 @@ int bamdst(int argc, char *argv[])
         case 'h':
             usage(1);
             break;
+        case NTHREADS:
+        case '@':
+            n_threads = atoi(optarg);
+            if (n_threads < 1) n_threads = 1;
+            break;
         case 'v':
             return show_version();
         case '1':
@@ -2263,7 +3178,9 @@ int bamdst(int argc, char *argv[])
             // more help
         }
     }
-    if (isNull(outdir) || isNull(probe))
+    if (isNull(outdir))
+        usage(0);
+    if (isNull(probe) && !gtf_enabled)
         usage(0);
     if (export_target_bam && check_filename_isbam(export_target_bam))
     {
@@ -2339,9 +3256,47 @@ int bamdst(int argc, char *argv[])
     }
     h_chrlength_init();
     header2chrhash(aux->h);
-    load_bed_init(probe, aux);
+    bool has_bed = (probe != NULL);
+    if (has_bed)
+        load_bed_init(probe, aux);
     chrhash_destroy();
-    freemem(probe);
+    if (probe) { freemem(probe); probe = NULL; }
+
+    /* Load GTF if enabled.  When -p is absent, GTF becomes the primary
+     * target (stored in h_tgt/h_flk).  When both -p and -g are present,
+     * GTF is stored as a parallel set in h_gtf/h_gtf_flk. */
+    if (gtf_enabled) {
+        load_gtf_init(gtf_file, aux);
+        if (has_bed) {
+            gtf_parallel = TRUE;  /* -p + -g together */
+        } else {
+            /* GTF-only mode: use GTF as primary target */
+            bedHand->destroy((void *)aux->h_tgt, destroy_void);
+            bedHand->destroy((void *)aux->h_flk, destroy_void);
+            aux->h_tgt = aux->h_gtf;
+            aux->h_flk = aux->h_gtf_flk;
+            aux->tgt_len = aux->gtf_len;
+            aux->tgt_nreg = aux->gtf_nreg;
+            /* move GTF depth histograms to primary slots */
+            if (aux->c_gtf_dep) {
+                count_destroy(aux->c_dep);
+                aux->c_dep = aux->c_gtf_dep;
+                aux->c_gtf_dep = NULL;
+            }
+            if (aux->c_gtf_rmdupdep) {
+                count_destroy(aux->c_rmdupdep);
+                aux->c_rmdupdep = aux->c_gtf_rmdupdep;
+                aux->c_gtf_rmdupdep = NULL;
+            }
+            if (aux->c_gtf_reg) {
+                count_destroy(aux->c_reg);
+                aux->c_reg = aux->c_gtf_reg;
+                aux->c_gtf_reg = NULL;
+            }
+            aux->h_gtf = NULL;
+            aux->h_gtf_flk = NULL;
+        }
+    }
     if (aux->c_isize->n < opt.isize_lim)
     {
         unsigned *new_a = realloc(aux->c_isize->a, opt.isize_lim * sizeof(unsigned));
@@ -2354,7 +3309,46 @@ int bamdst(int argc, char *argv[])
     memset(aux->c_isize->a, 0, aux->c_isize->n * sizeof(unsigned));
     aux->nchr = aux->h->n_targets;
     struct bamflag fs = {};
-    load_bamfiles(&opt, aux, &fs);
+
+    /* multi-threaded: check BAI index */
+    if (n_threads > 1) {
+        const bam_index_t *bai = NULL;
+        const char *bam_path = (opt.nfiles > 0) ? opt.inputs[0] : NULL;
+        if (bam_path) {
+            bai = bam_index_load(bam_path);
+            if (bai == NULL) {
+                errabort("BAI index not found for '%s'.\n"
+                         "Multi-threaded mode (-@ %d) requires a BAM index.\n"
+                         "Run: samtools index %s",
+                         bam_path, n_threads, bam_path);
+            }
+            /* Light pre-pass: count total reads (no CIGAR walk, no depth). */
+            {
+                bamFile pp = bam_open(bam_path, "r");
+                bam1_t *bb = (bam1_t *)needmem(sizeof(bam1_t));
+                int pp_ret;
+                while ((pp_ret = bam_read1(pp, bb)) >= 0) {
+                    bam1_core_t *cc = &bb->core;
+                    if (cc->flag & BAM_FSECONDARY ||
+                        cc->flag & BAM_FSUPPLEMENTARY)
+                        continue;
+                    int dummy;
+                    flagstat(&fs, cc, dummy);
+                    if (cc->qual >= opt.mapQ_lim) fs.n_qual++;
+                }
+                bam_destroy1(bb);
+                bgzf_close(pp);
+                mt_prepass_done = TRUE;
+            }
+            load_bamfiles_mt(&opt, aux, &fs, bai);
+            bam_index_destroy((bam_index_t *)bai);
+        } else {
+            warnings("stdin input: cannot seek; falling back to single-thread");
+            load_bamfiles(&opt, aux, &fs);
+        }
+    } else {
+        load_bamfiles(&opt, aux, &fs);
+    }
     print_report(&opt, aux, &fs);
     aux_destroy(aux);
     for (i = 0; i < opt.nfiles; ++i)
@@ -2366,6 +3360,7 @@ int bamdst(int argc, char *argv[])
     freemem(opt.ratios);
 freeall:
     freemem(export_target_bam);
+    if (gtf_file) freemem(gtf_file);
     freemem(outdir);
     return 0;
 }
