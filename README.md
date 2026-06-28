@@ -1,7 +1,7 @@
 # bamdst — BAM Depth Statistics for Targeted Sequencing
 
 bamdst is a lightweight tool to compute depth and coverage statistics for target
-regions (e.g. exome capture panels) from sorted BAM files.
+regions (e.g. exome capture panels, gene annotations) from sorted BAM files.
 
 ## Background
 
@@ -23,30 +23,44 @@ This project takes a deliberate, opinionated stance.
   and a BGZF implementation (`bgzf.c`) that are small enough to read and understand
   in an afternoon. There are no external build requirements beyond a C compiler and
   zlib.
-- **No multi-threading.** The processing loop is single-threaded and sequential,
-  mirroring the natural sorted-BAM traversal pattern. This makes the control flow
-  easy to trace and debug.
-- **Self-contained.** The entire codebase is ~6500 lines of C, including all
+- **Self-contained.** The entire codebase is ~8000 lines of C, including all
   dependencies. You can read it from top to bottom.
+
+**v2** (this branch) adds GTF annotation support, strand-aware coverage, and
+multi-threaded BAM processing — all without introducing htslib or any other
+external dependency beyond pthread (POSIX standard).
 
 ## Install
 
 ```bash
 git clone https://github.com/shiquan/bamdst
 cd bamdst
+git checkout v2   # for GTF + multi-threading features
 make
 ```
 
 bamdst is also hosted on conda via a third-party package `xdgene::bamdst` (thanks @xdgene), but may not be the latest version.
 
-## Usage
+## Quick Start
 
 ```bash
-# Normal mode
+# BED probe regions (classic mode)
 bamdst -p probe.bed -o output_dir/ in1.bam
 
-# Multiple BAM files
-bamdst -p probe.bed -o output_dir/ in1.bam in2.bam
+# GTF gene coverage (v2)
+bamdst -g genes.gtf -o output_dir/ in1.bam
+
+# GTF exon-level coverage (v2)
+bamdst -g genes.gtf --gtf-level exon -o output_dir/ in1.bam
+
+# Strand-separated gene coverage (v2)
+bamdst -g genes.gtf --gtf-stranded -o output_dir/ in1.bam
+
+# BED + GTF parallel coverage (v2)
+bamdst -p probe.bed -g genes.gtf -o output_dir/ in1.bam
+
+# Multi-threaded (v2, requires BAM index)
+bamdst -g genes.gtf -@ 4 -o output_dir/ in1.bam
 
 # Pipeline mode (stdin)
 samtools view in1.bam -u | bamdst -p probe.bed -o output_dir/ -
@@ -70,10 +84,16 @@ bamdst --depthratio 0.1,0.3,0.5 -p probe.bed -o output_dir/ in1.bam
 | `-o`, `--outdir DIR` | Output directory. Must already exist and be writable. bamdst will not create it. |
 | `-p`, `--bed FILE` | Probe/target regions in BED format (0-based). Regions are merged before calculation. |
 
+At least one of `-p` or `-g` is required.
+
 ### Optional
 
 | Option | Default | Description |
 |--------|---------|-------------|
+| `-g`, `--gtf FILE` | - | GTF annotation file for gene/exon coverage (v2). |
+| `--gtf-level` | gene | GTF coverage level: `gene` or `exon` (v2). |
+| `--gtf-stranded` | - | Separate forward/reverse strand GTF coverage (v2). |
+| `-@`, `--threads N` | 1 | Number of threads for parallel BAM processing. Requires `.bai` index (v2). |
 | `-f`, `--flank` | 200 | Number of flanking bases to extend each target region. |
 | `-q` | 20 | MAPQ cutoff. Reads with MAPQ below this value are excluded from rmdup depth and `n_qual` counts. |
 | `--maxdepth` | 0 (no limit) | Maximum depth value to include in the cumulative depth distribution plot. |
@@ -146,6 +166,11 @@ When using `-F json`, a single `report.json` is produced containing all statisti
 These statistics use the **coverage depth** (`covdep`), which counts all reads plus
 positions covered by deletions (CIGAR `D` operations).
 
+When using `-p` (BED), the Target section describes probe region coverage.
+When using `-g` (GTF) alone, the Target section describes gene/exon coverage.
+When using both `-p` and `-g`, the Target section describes BED coverage, and
+additional `[GTF Gene]` or `[GTF Exon]` sections describe the GTF coverage.
+
 | Field | Description |
 |-------|-------------|
 | Target Reads | Number of reads whose aligned bases overlap with target regions. A read spanning multiple target regions is counted once. |
@@ -206,6 +231,26 @@ base. They describe how many regions achieve certain mean depth thresholds.
 | Fraction Region covered >= 30x | Regions with mean depth ≥ 30. |
 | Fraction Region covered >= 100x | Regions with mean depth ≥ 100. |
 
+### `[GTF Gene]` / `[GTF Exon]` GTF Coverage (v2)
+
+When `-g` is used together with `-p` (parallel mode), an additional section reports
+coverage for GTF-defined gene or exon regions. The fields mirror the `[Target]`
+section above, with the prefix `[GTF Gene]` or `[GTF Exon]`.
+
+### `[GTF Gene Forward]` / `[GTF Gene Reverse]` Stranded Coverage (v2)
+
+When `--gtf-stranded` is enabled, the GTF section is further split by strand:
+
+| Field | Description |
+|-------|-------------|
+| [GTF Gene Forward] Reads | Reads on the forward strand overlapping forward-strand genes. |
+| [GTF Gene Reverse] Reads | Reads on the reverse strand overlapping reverse-strand genes. |
+| [GTF Gene Forward] Len of region | Total length of forward-strand gene regions. |
+| [GTF Gene Reverse] Len of region | Total length of reverse-strand gene regions. |
+
+Additional fields (Average depth, Coverage at 4x/10x/30x/100x, rmdup coverage, Region Count)
+are reported for each strand separately.
+
 ### `[flank]` Flank Region Statistics
 
 Flank regions are the areas adjacent to target regions (extended by `--flank` bases
@@ -227,6 +272,35 @@ on each side). These statistics exclude the target regions themselves.
 | Coverage (>=10x) | Flank bases with depth ≥ 10. |
 | Coverage (>=30x) | Flank bases with depth ≥ 30. |
 | Coverage (>=100x) | Flank bases with depth ≥ 100. |
+
+## Multi-threading (v2)
+
+bamdst v2 supports parallel BAM processing using POSIX threads (`-@ N` / `--threads N`).
+Chromosomes are partitioned among threads using largest-first bin packing to balance
+the workload.
+
+**Requirements:**
+- A BAM index file (`.bai`) must exist alongside the input BAM. If missing, bamdst
+  will print a clear error message with instructions to run `samtools index`.
+- The pipeline mode (stdin, `-`) is not supported for multi-threading and falls
+  back to single-threaded processing.
+
+**Performance:**
+
+A light pre-pass counts global read statistics. Worker threads then process
+their assigned chromosomes independently, each reading the BAM sequentially
+and filtering by chromosome. Results are merged additively (histogram addition
++ counter summation).
+
+With 4 threads on a typical 3.4 GB BAM file (~38M reads, 26K gene regions):
+
+| Mode | Wall time | Speedup |
+|------|-----------|---------|
+| Single-thread | ~6 min | 1× |
+| 4 threads | ~2 min | ~3× |
+
+Actual speedup depends on chromosome count, target region distribution, and I/O
+bandwidth.
 
 ## Other Output Files
 
@@ -316,6 +390,26 @@ When using `-F json`, a single `report.json` is produced.
 }
 ```
 
+## Architecture (v2)
+
+```
+Source files:
+  bamdst.c         — Main program (command line, BAM processing, reporting)
+  bedutil.c/h      — BED file I/O, interval merge, strand-aware operations
+  bgzf.c/h         — BGZF block compression (BAM I/O layer)
+  commons.c/h      — Memory, logging, error handling
+  count.h          — Dynamic depth histograms (count32_t)
+  dict.c/h         — String interning library (ported from PISA)
+  gtf.c/h          — GTF parser with gene→transcript→exon hierarchy (PISA)
+  number.c/h       — Numeric string parsing (PISA)
+  samlib/          — Minimal BAM/SAM library (bam, bam_index, sam_header)
+  khash.h          — Hash table (klib)
+  kseq.h           — Stream parser (klib)
+  kstring.h        — Dynamic string (klib)
+  ksort.h          — Introspective sort (klib)
+  knetfile.c/h     — Network file I/O (klib)
+```
+
 ## Notes
 
 - The output directory specified by `-o` must already exist and be writable. bamdst
@@ -327,3 +421,7 @@ When using `-F json`, a single `report.json` is produced.
   and chromosome ordering (the header from the first file is used).
 - `depth.tsv.gz` and `region.tsv.gz` are compressed with bgzip and can be indexed
   with `tabix` for fast random access.
+- Multi-threaded mode (`-@`) requires a BAM index (`.bai`). Run `samtools index`
+  to generate one if needed.
+- The pipeline mode (`-`) cannot use multi-threading and falls back to
+  single-threaded processing automatically.
