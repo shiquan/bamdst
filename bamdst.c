@@ -73,7 +73,7 @@
 #include <pthread.h>
 
 static char const *program_name = "bamdst";
-static char const *Version = "1.2.0";
+static char const *Version = "2.0.0";
 
 /* flank region will be stat in the coverage report file,
  * this value can be set by -f / --flank */

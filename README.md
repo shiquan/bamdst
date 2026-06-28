@@ -372,7 +372,7 @@ When using `-F json`, a single `report.json` is produced.
 ```json
 {
   "program": "bamdst",
-  "version": "1.2.0",
+  "version": "2.0.0",
   "input_files": ["in1.bam"],
   "reads": { "total": ..., "mapped": ..., ... },
   "insert_size": { "average": ..., "median": ... },
