@@ -1394,6 +1394,7 @@ static void *mt_worker(void *arg)
         warnings("[thread %d] cannot open %s", ctx->tid, ctx->bam_path);
         return NULL;
     }
+    { bam_header_t *wh = bam_header_read(fp); bam_header_destroy(wh); }
 
     count32_init(ctx->c_dep); count32_init(ctx->c_rmdupdep);
     count32_init(ctx->c_isize); count32_init(ctx->c_flkdep);
@@ -1583,6 +1584,23 @@ static int load_bamfiles_mt(struct opt_aux *f, aux_t *a, bamflag_t *fs,
             count_destroy(ctx[t].c_gtf_rmdupdep);
         }
     }
+    /* Fill unprocessed chromosomes with zero histograms
+     * (mirrors check_reachable_regions in single-threaded path). */
+    {
+        int ci;
+        for (ci = 0; ci < a->h->n_targets; ++ci) {
+            khiter_t k = kh_get(reg, a->h_tgt, a->h->target_name[ci]);
+            if (k != kh_end(a->h_tgt)) {
+                bedreglist_t *t = &kh_val(a->h_tgt, k);
+                if (!t->data) {
+                    count32_t *z;
+                    count32_init(z);
+                    t->data = (void *)z;
+                }
+            }
+        }
+    }
+
     for (t = 0; t < n_threads; ++t) free(mask[t]);
     free(mask); free(ctx);
     return 0;
@@ -3242,7 +3260,9 @@ int bamdst(int argc, char *argv[])
                 aux->h = h_tmp;
             else
                 bam_header_destroy(h_tmp);
-            opt.inputs[i] = strdup(argv[optind + i]);
+            opt.inputs[i] = realpath(argv[optind + i], NULL);
+            if (!opt.inputs[i])
+                opt.inputs[i] = strdup(argv[optind + i]);
         }
         aux->ndata = n;
     }
@@ -3317,14 +3337,22 @@ int bamdst(int argc, char *argv[])
         if (bam_path) {
             bai = bam_index_load(bam_path);
             if (bai == NULL) {
-                errabort("BAI index not found for '%s'.\n"
-                         "Multi-threaded mode (-@ %d) requires a BAM index.\n"
-                         "Run: samtools index %s",
-                         bam_path, n_threads, bam_path);
+                int64_t *blk = NULL;
+                int64_t nb = bgzf_scan_blocks(bam_path, &blk);
+                if (nb > 0) {
+                    fprintf(stderr, "[bamdst] No BAI; %" PRId64
+                            " blocks, %d threads.\n", nb, n_threads);
+                    free(blk);
+                } else {
+                    errabort("'%s' is not a valid BGZF/BAM file.", bam_path);
+                }
             }
             /* Light pre-pass: count total reads (no CIGAR walk, no depth). */
             {
                 bamFile pp = bam_open(bam_path, "r");
+                if (!pp) errabort("pre-pass: cannot re-open %s", bam_path);
+                bam_header_t *pp_hdr = bam_header_read(pp); /* skip header */
+                bam_header_destroy(pp_hdr);
                 bam1_t *bb = (bam1_t *)needmem(sizeof(bam1_t));
                 int pp_ret;
                 while ((pp_ret = bam_read1(pp, bb)) >= 0) {
@@ -3341,7 +3369,7 @@ int bamdst(int argc, char *argv[])
                 mt_prepass_done = TRUE;
             }
             load_bamfiles_mt(&opt, aux, &fs, bai);
-            bam_index_destroy((bam_index_t *)bai);
+            if (bai) bam_index_destroy((bam_index_t *)bai);
         } else {
             warnings("stdin input: cannot seek; falling back to single-thread");
             load_bamfiles(&opt, aux, &fs);

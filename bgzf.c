@@ -99,6 +99,11 @@ static inline void packInt32(uint8_t *buffer, uint32_t value)
 	buffer[3] = value >> 24;
 }
 
+static inline int unpackInt32(const uint8_t *buffer)
+{
+	return buffer[0] | buffer[1] << 8 | buffer[2] << 16 | buffer[3] << 24;
+}
+
 static BGZF *bgzf_read_init()
 {
 	BGZF *fp;
@@ -501,6 +506,126 @@ int bgzf_is_bgzf(const char *fn)
 	if (n != 16) return 0;
 	return memcmp(g_magic, buf, 16) == 0? 1 : 0;
 }
+
+/* ================================================================
+ * Block-level API — for multi-threaded pipeline processing
+ * ================================================================ */
+
+/*
+ * Scan a BGZF file and record the byte offset of every block.
+ * Reads only the 18-byte header per block, using BSIZE to skip.
+ * Returns number of blocks, -1 on error.  Caller must free *offsets.
+ */
+int64_t bgzf_scan_blocks(const char *path, int64_t **offsets)
+{
+	FILE *fp;
+	uint8_t header[BLOCK_HEADER_LENGTH];
+	int64_t pos, n = 0, m = 0;
+	int64_t *off = NULL;
+
+	fp = fopen(path, "rb");
+	if (!fp) return -1;
+
+	while (1) {
+		pos = ftello(fp);
+		if (fread(header, 1, BLOCK_HEADER_LENGTH, fp) != BLOCK_HEADER_LENGTH)
+			break;
+		if (!check_header(header)) break;
+
+		if (n == m) {
+			m = m == 0 ? 4096 : m * 2;
+			off = realloc(off, m * sizeof(int64_t));
+			if (!off) { fclose(fp); return -1; }
+		}
+		off[n++] = pos;
+
+		/* skip to next block using BSIZE from header */
+		int block_len = unpackInt16((uint8_t*)&header[16]) + 1;
+		if (block_len <= BLOCK_HEADER_LENGTH) break;
+		if (fseeko(fp, pos + block_len, SEEK_SET) != 0) break;
+	}
+	fclose(fp);
+	*offsets = off;
+	return n;
+}
+
+/*
+ * Read one raw (compressed) BGZF block from the current file position.
+ * Allocates *compressed; caller must free.
+ * Returns compressed length, or -1 on error.  Sets *compressed_len.
+ */
+int bgzf_read_raw_block(BGZF *fp, uint8_t **compressed, int *compressed_len)
+{
+	uint8_t header[BLOCK_HEADER_LENGTH];
+	int block_len;
+	int64_t pos = _bgzf_tell((_bgzf_file_t)fp->fp);
+
+	if (_bgzf_read(fp->fp, header, BLOCK_HEADER_LENGTH) != BLOCK_HEADER_LENGTH)
+		return -1;
+	if (!check_header(header)) {
+		fp->errcode |= BGZF_ERR_HEADER;
+		return -1;
+	}
+	block_len = unpackInt16((uint8_t*)&header[16]) + 1;
+
+	uint8_t *buf = malloc(block_len);
+	if (!buf) return -1;
+	memcpy(buf, header, BLOCK_HEADER_LENGTH);
+
+	int remaining = block_len - BLOCK_HEADER_LENGTH;
+	if (_bgzf_read(fp->fp, buf + BLOCK_HEADER_LENGTH, remaining) != remaining) {
+		fp->errcode |= BGZF_ERR_IO;
+		free(buf);
+		return -1;
+	}
+
+	*compressed = buf;
+	*compressed_len = block_len;
+	return block_len;
+}
+
+/*
+ * Stateless decompression of one raw BGZF block.
+ * 'compressed' must point to the full block (18-byte header + data + 8-byte footer).
+ * Returns uncompressed length, or -1 on error.
+ */
+int bgzf_inflate_raw(const uint8_t *compressed, int compressed_len,
+                      uint8_t *uncompressed, int uncompressed_size)
+{
+	z_stream zs;
+	int block_len;
+	uint32_t crc, isize;
+
+	if (compressed_len < BLOCK_HEADER_LENGTH + BLOCK_FOOTER_LENGTH)
+		return -1;
+	if (!check_header(compressed))
+		return -1;
+
+	block_len = unpackInt16((uint8_t*)&compressed[16]) + 1;
+	if (block_len != compressed_len) return -1;
+
+	memset(&zs, 0, sizeof(z_stream));
+	zs.next_in   = (uint8_t*)compressed + BLOCK_HEADER_LENGTH;
+	zs.avail_in  = compressed_len - BLOCK_HEADER_LENGTH - BLOCK_FOOTER_LENGTH;
+	zs.next_out  = uncompressed;
+	zs.avail_out = uncompressed_size;
+
+	if (inflateInit2(&zs, -15) != Z_OK) return -1;
+	if (inflate(&zs, Z_FINISH) != Z_STREAM_END) {
+		inflateEnd(&zs);
+		return -1;
+	}
+	if (inflateEnd(&zs) != Z_OK) return -1;
+
+	/* verify CRC and ISIZE (optional, for robustness) */
+	crc   = unpackInt32((uint8_t*)&compressed[compressed_len - 8]);
+	isize = unpackInt32((uint8_t*)&compressed[compressed_len - 4]);
+	(void)crc; (void)isize; /* CRC check could be added here */
+
+	return (int)zs.total_out;
+}
+
+/* ---- end block-level API ---- */
 
 int bgzf_getc(BGZF *fp)
 {
