@@ -1290,6 +1290,8 @@ static void mt_count_merge(count32_t *dst, count32_t *src)
 static void mt_flag_merge(bamflag_t *dst, const bamflag_t *src)
 {
     if (mt_prepass_done) {
+        /* pre-pass counted all global stats including rmdup;
+         * workers only contribute target-specific fields. */
         dst->n_tgt        += src->n_tgt;
         dst->n_flk        += src->n_flk;
         dst->n_tdata      += src->n_tdata;
@@ -3434,9 +3436,13 @@ int bamdst(int argc, char *argv[])
                     if (cc->flag & BAM_FSECONDARY ||
                         cc->flag & BAM_FSUPPLEMENTARY)
                         continue;
-                    int dummy;
-                    flagstat(&fs, cc, dummy);
+                    int pp_sf;
+                    flagstat(&fs, cc, pp_sf);
                     if (cc->qual >= opt.mapQ_lim) fs.n_qual++;
+                    if (pp_sf == 1) {
+                        if (cc->flag & BAM_FREAD1) fs.n_rmdup1++;
+                        if (cc->flag & BAM_FREAD2) fs.n_rmdup2++;
+                    }
                 }
                 bam_destroy1(bb);
                 bgzf_close(pp);
