@@ -1,7 +1,7 @@
 CC=		gcc
 CFLAGS=		-g -Wall -O2 
 DFLAGS=		-D_FILE_OFFSET_BITS=64 -D_LARGEFILE64_SOURCE -DBGZF_CACHE
-LOBJS=		bgzf.o kstring.o bam_aux.o bam.o bam_import.o bam_index.o sam_header.o bedutil.o commons.o number.o dict.o gtf.o
+LOBJS=		bgzf.o bgzf_blocks.o kstring.o bam_aux.o bam.o bam_import.o bam_index.o sam_header.o bedutil.o commons.o number.o dict.o gtf.o
 PROG=		bamdst
 INCLUDES=	-Isamlib/ -I.
 SUBDIRS=	. samlib
@@ -27,6 +27,9 @@ bamdst:lib $(AOBJS) samlib/bam.h
 
 bgzf.o:bgzf.c bgzf.h
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bgzf.c -o $@
+
+bgzf_blocks.o:bgzf_blocks.c bgzf_blocks.h bgzf.h
+		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) bgzf_blocks.c -o $@
 
 kstring.o:kstring.c kstring.h
 		$(CC) -c $(CFLAGS) $(DFLAGS) $(INCLUDES) kstring.c -o $@

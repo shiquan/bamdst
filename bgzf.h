@@ -189,31 +189,6 @@ extern "C" {
 	 */
 	int bgzf_read_block(BGZF *fp);
 
-	/*********************
-	 * Block-level API (v2) — for multi-threaded pipeline processing
-	 *********************/
-
-	/**
-	 * Scan a BGZF file and return the byte offsets of all blocks.
-	 * Returns number of blocks, or -1 on error.  Caller must free *offsets.
-	 */
-	int64_t bgzf_scan_blocks(const char *path, int64_t **offsets);
-
-	/**
-	 * Read one raw (compressed) BGZF block from the current file position.
-	 * fp must be positioned at a valid block header.
-	 * Returns compressed length, or -1 on error.
-	 */
-	int bgzf_read_raw_block(BGZF *fp, uint8_t **compressed, int *compressed_len);
-
-	/**
-	 * Inflate a raw BGZF block.  Stateless — no BGZF handle required.
-	 * 'compressed' points to the full block including 18-byte header.
-	 * Returns uncompressed length, or -1 on error.
-	 */
-	int bgzf_inflate_raw(const uint8_t *compressed, int compressed_len,
-	                      uint8_t *uncompressed, int uncompressed_size);
-
 #ifdef __cplusplus
 }
 #endif

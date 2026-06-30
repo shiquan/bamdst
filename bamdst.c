@@ -69,6 +69,9 @@
 // GTF support (from PISA)
 #include "gtf.h"
 
+// BGZF block-level API (v2)
+#include "bgzf_blocks.h"
+
 #include <sys/stat.h>
 #include <pthread.h>
 
