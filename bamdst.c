@@ -1297,7 +1297,13 @@ static void mt_flag_merge(bamflag_t *dst, const bamflag_t *src)
         dst->n_trmdat     += src->n_trmdat;
         dst->n_gtf_reads  += src->n_gtf_reads;
         dst->n_gtf_data   += src->n_gtf_data;
-        dst->n_gtf_rmdpdat += src->n_gtf_rmdpdat;
+        dst->n_gtf_rmdpdat     += src->n_gtf_rmdpdat;
+        dst->n_gtf_fwd_reads    += src->n_gtf_fwd_reads;
+        dst->n_gtf_rev_reads    += src->n_gtf_rev_reads;
+        dst->n_gtf_fwd_data     += src->n_gtf_fwd_data;
+        dst->n_gtf_rev_data     += src->n_gtf_rev_data;
+        dst->n_gtf_fwd_rmdpdat  += src->n_gtf_fwd_rmdpdat;
+        dst->n_gtf_rev_rmdpdat  += src->n_gtf_rev_rmdpdat;
         return;
     }
     dst->n_reads      += src->n_reads;
@@ -1335,6 +1341,7 @@ struct mt_ctx {
     const char *bam_path;
     const bam_header_t *hdr;
     regHash_t *h_tgt, *h_flk, *h_gtf;
+    regHash_t *h_gtf_fwd, *h_gtf_rev;  /* stranded GTF */
     int8_t *chrom_mask;
     int n_chrom_total, mapQ_lim, isize_lim;
 
@@ -1342,6 +1349,9 @@ struct mt_ctx {
     count32_t *c_dep, *c_rmdupdep, *c_isize, *c_flkdep, *c_reg;
     bamflag_t fs;
     count32_t *c_gtf_dep, *c_gtf_rmdupdep;
+    /* stranded GTF results */
+    count32_t *c_gtf_fwd_dep, *c_gtf_fwd_rmdupdep;
+    count32_t *c_gtf_rev_dep, *c_gtf_rev_rmdupdep;
 };
 
 /* ---- simplified depth stat (no BGZF output, just histogram) ---- */
@@ -1407,8 +1417,17 @@ static void *mt_worker(void *arg)
         count32_init(ctx->c_gtf_dep);
         count32_init(ctx->c_gtf_rmdupdep);
     }
+    if (ctx->h_gtf_fwd) {
+        count32_init(ctx->c_gtf_fwd_dep);
+        count32_init(ctx->c_gtf_fwd_rmdupdep);
+    }
+    if (ctx->h_gtf_rev) {
+        count32_init(ctx->c_gtf_rev_dep);
+        count32_init(ctx->c_gtf_rev_rmdupdep);
+    }
 
     struct depnode *tgt_node = NULL, *flk_node = NULL, *gtf_node = NULL;
+    struct depnode *gtf_fwd_node = NULL, *gtf_rev_node = NULL;
     count32_t *depvals_chr = NULL;
     bedreglist_t *tar = NULL;
     int cur_tid = -1;
@@ -1444,9 +1463,12 @@ static void *mt_worker(void *arg)
             }
             while (flk_node) { mts_stat_flk(flk_node, ctx->c_flkdep); del_node(flk_node); }
             while (gtf_node) { mts_stat_gtf(gtf_node, ctx->c_gtf_dep, ctx->c_gtf_rmdupdep); del_node(gtf_node); }
+            while (gtf_fwd_node) { mts_stat_gtf(gtf_fwd_node, ctx->c_gtf_fwd_dep, ctx->c_gtf_fwd_rmdupdep); del_node(gtf_fwd_node); }
+            while (gtf_rev_node) { mts_stat_gtf(gtf_rev_node, ctx->c_gtf_rev_dep, ctx->c_gtf_rev_rmdupdep); del_node(gtf_rev_node); }
 
             cur_tid = c->tid;
             tgt_node = NULL; flk_node = NULL; gtf_node = NULL;
+            gtf_fwd_node = NULL; gtf_rev_node = NULL;
             tar = NULL; depvals_chr = NULL;
 
             if (cur_tid >= ctx->n_chrom_total || !ctx->chrom_mask[cur_tid])
@@ -1469,6 +1491,16 @@ static void *mt_worker(void *arg)
                 k = kh_get(reg, ctx->h_gtf, chr_name);
                 if (k != kh_end(ctx->h_gtf))
                     gtf_node = bed_depnode_list(&kh_val(ctx->h_gtf, k));
+            }
+            if (ctx->h_gtf_fwd) {
+                k = kh_get(reg, ctx->h_gtf_fwd, chr_name);
+                if (k != kh_end(ctx->h_gtf_fwd))
+                    gtf_fwd_node = bed_depnode_list(&kh_val(ctx->h_gtf_fwd, k));
+            }
+            if (ctx->h_gtf_rev) {
+                k = kh_get(reg, ctx->h_gtf_rev, chr_name);
+                if (k != kh_end(ctx->h_gtf_rev))
+                    gtf_rev_node = bed_depnode_list(&kh_val(ctx->h_gtf_rev, k));
             }
         }
 
@@ -1496,6 +1528,28 @@ static void *mt_worker(void *arg)
             if (gtf_node && isZero(gtf_node->len)) depnode_init(gtf_node);
         }
         if (gtf_node && readcore(gtf_node, b, state)) ctx->fs.n_gtf_reads++;
+
+        /* GTF stranded: count by read strand */
+        {
+            int read_strand = (c->flag & BAM_FREVERSE) ? 1 : 0;
+            struct depnode **g_snode = read_strand ? &gtf_rev_node : &gtf_fwd_node;
+            count32_t *g_sdep = read_strand ? ctx->c_gtf_rev_dep : ctx->c_gtf_fwd_dep;
+            count32_t *g_srmdp = read_strand ? ctx->c_gtf_rev_rmdupdep : ctx->c_gtf_fwd_rmdupdep;
+
+            while (*g_snode && (*g_snode)->stop < c->pos + 1) {
+                mts_stat_gtf(*g_snode, g_sdep, g_srmdp);
+                struct depnode *cur = *g_snode;
+                *g_snode = cur->next;
+                freemem(cur->vals); freemem(cur->cnts);
+                freemem(cur->rmdupdep); freemem(cur->covdep); freemem(cur);
+                if (*g_snode && isZero((*g_snode)->len))
+                    depnode_init(*g_snode);
+            }
+            if (*g_snode && readcore(*g_snode, b, state)) {
+                if (read_strand) ctx->fs.n_gtf_rev_reads++;
+                else            ctx->fs.n_gtf_fwd_reads++;
+            }
+        }
     }
 
     /* finalize last chromosome */
@@ -1506,6 +1560,8 @@ static void *mt_worker(void *arg)
     }
     while (flk_node) { mts_stat_flk(flk_node, ctx->c_flkdep); del_node(flk_node); }
     while (gtf_node) { mts_stat_gtf(gtf_node, ctx->c_gtf_dep, ctx->c_gtf_rmdupdep); del_node(gtf_node); }
+    while (gtf_fwd_node) { mts_stat_gtf(gtf_fwd_node, ctx->c_gtf_fwd_dep, ctx->c_gtf_fwd_rmdupdep); del_node(gtf_fwd_node); }
+    while (gtf_rev_node) { mts_stat_gtf(gtf_rev_node, ctx->c_gtf_rev_dep, ctx->c_gtf_rev_rmdupdep); del_node(gtf_rev_node); }
 
     bam_destroy1(b);
     bgzf_close(fp);
@@ -1559,6 +1615,8 @@ static int load_bamfiles_mt(struct opt_aux *f, aux_t *a, bamflag_t *fs,
         ctx[t].hdr = a->h;
         ctx[t].h_tgt = a->h_tgt; ctx[t].h_flk = a->h_flk;
         ctx[t].h_gtf = a->h_gtf;
+        ctx[t].h_gtf_fwd = gtf_stranded ? a->gtf_fwd.h_tgt : NULL;
+        ctx[t].h_gtf_rev = gtf_stranded ? a->gtf_rev.h_tgt : NULL;
         ctx[t].chrom_mask = mask[t];
         ctx[t].n_chrom_total = a->h->n_targets;
         ctx[t].mapQ_lim = f->mapQ_lim;
@@ -1585,6 +1643,19 @@ static int load_bamfiles_mt(struct opt_aux *f, aux_t *a, bamflag_t *fs,
         if (ctx[t].c_gtf_rmdupdep && a->c_gtf_rmdupdep) {
             mt_count_merge(a->c_gtf_rmdupdep, ctx[t].c_gtf_rmdupdep);
             count_destroy(ctx[t].c_gtf_rmdupdep);
+        }
+        /* stranded GTF merge */
+        if (ctx[t].c_gtf_fwd_dep && a->gtf_fwd.c_dep) {
+            mt_count_merge(a->gtf_fwd.c_dep, ctx[t].c_gtf_fwd_dep);
+            mt_count_merge(a->gtf_fwd.c_rmdupdep, ctx[t].c_gtf_fwd_rmdupdep);
+            count_destroy(ctx[t].c_gtf_fwd_dep);
+            count_destroy(ctx[t].c_gtf_fwd_rmdupdep);
+        }
+        if (ctx[t].c_gtf_rev_dep && a->gtf_rev.c_dep) {
+            mt_count_merge(a->gtf_rev.c_dep, ctx[t].c_gtf_rev_dep);
+            mt_count_merge(a->gtf_rev.c_rmdupdep, ctx[t].c_gtf_rev_rmdupdep);
+            count_destroy(ctx[t].c_gtf_rev_dep);
+            count_destroy(ctx[t].c_gtf_rev_rmdupdep);
         }
     }
     /* Fill unprocessed chromosomes with zero histograms
