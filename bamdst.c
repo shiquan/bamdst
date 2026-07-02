@@ -1345,6 +1345,7 @@ struct mt_ctx {
     regHash_t *h_tgt, *h_flk, *h_gtf;
     regHash_t *h_gtf_fwd, *h_gtf_rev;  /* stranded GTF */
     int8_t *chrom_mask;
+    int64_t *chrom_offsets;            /* pre-pass chromosome seek offsets */
     int n_chrom_total, mapQ_lim, isize_lim;
 
     /* results */
@@ -1436,6 +1437,117 @@ static void *mt_worker(void *arg)
 
     bam1_t *b = (bam1_t *)needmem(sizeof(bam1_t));
 
+    /* ---- Offset-based mode: seek to each assigned chromosome ---- */
+    if (ctx->chrom_offsets) {
+        int ci;
+        for (ci = 0; ci < ctx->n_chrom_total; ++ci) {
+            if (!ctx->chrom_mask[ci] || ctx->chrom_offsets[ci] == 0)
+                continue;
+
+            const char *chr_name = ctx->hdr->target_name[ci];
+            khiter_t k = kh_get(reg, ctx->h_tgt, chr_name);
+            if (k == kh_end(ctx->h_tgt)) continue;
+
+            /* seek to first record of this chromosome */
+            bgzf_seek(fp, ctx->chrom_offsets[ci], SEEK_SET);
+
+            bedreglist_t *tar2 = &kh_val(ctx->h_tgt, k);
+            struct depnode *tn = bed_depnode_list(tar2);
+            count32_t *dc;
+            count32_init(dc);
+            tar2->data = (void *)dc;
+            struct depnode *fn = NULL, *gn = NULL;
+            struct depnode *gf = NULL, *gr = NULL;
+
+            k = kh_get(reg, ctx->h_flk, chr_name);
+            if (k != kh_end(ctx->h_flk))
+                fn = bed_depnode_list(&kh_val(ctx->h_flk, k));
+            if (ctx->h_gtf) {
+                k = kh_get(reg, ctx->h_gtf, chr_name);
+                if (k != kh_end(ctx->h_gtf))
+                    gn = bed_depnode_list(&kh_val(ctx->h_gtf, k));
+            }
+            if (ctx->h_gtf_fwd) {
+                k = kh_get(reg, ctx->h_gtf_fwd, chr_name);
+                if (k != kh_end(ctx->h_gtf_fwd))
+                    gf = bed_depnode_list(&kh_val(ctx->h_gtf_fwd, k));
+            }
+            if (ctx->h_gtf_rev) {
+                k = kh_get(reg, ctx->h_gtf_rev, chr_name);
+                if (k != kh_end(ctx->h_gtf_rev))
+                    gr = bed_depnode_list(&kh_val(ctx->h_gtf_rev, k));
+            }
+
+            /* process records for this chromosome */
+            while (bam_read1(fp, b) >= 0) {
+                bam1_core_t *c = &b->core;
+                if (c->flag & BAM_FSECONDARY || c->flag & BAM_FSUPPLEMENTARY)
+                    continue;
+                if (c->tid != ci) break; /* past this chromosome */
+
+                int sf;
+                flagstat(&ctx->fs, c, sf);
+                if (c->qual >= ctx->mapQ_lim) ctx->fs.n_qual++;
+                if (c->tid == -1 || sf == -3) continue;
+
+                cntstat_t st = CMATCH;
+                if (sf == 2) st = CDUP;
+                else if (c->qual < ctx->mapQ_lim) st = CLOWQ;
+                if (sf == 1) {
+                    if (c->flag & BAM_FREAD1) ctx->fs.n_rmdup1++;
+                    if (c->flag & BAM_FREAD2) ctx->fs.n_rmdup2++;
+                }
+                if (c->isize > 0 && c->isize < ctx->isize_lim)
+                    count_increase(ctx->c_isize, c->isize, uint32_t);
+
+                while (fn && fn->stop < c->pos + 1)
+                    { mts_stat_flk(fn, ctx->c_flkdep); del_node(fn); }
+                if (fn && readcore(fn, b, st)) ctx->fs.n_flk++;
+
+                while (tn && tn->stop < c->pos + 1) {
+                    mts_stat_region(tn, ctx->c_dep, ctx->c_rmdupdep, ctx->c_reg, dc);
+                    del_node(tn);
+                    if (tn && isZero(tn->len)) depnode_init(tn);
+                }
+                if (tn && readcore(tn, b, st)) ctx->fs.n_tgt++;
+
+                while (gn && gn->stop < c->pos + 1)
+                    { mts_stat_gtf(gn, ctx->c_gtf_dep, ctx->c_gtf_rmdupdep); del_node(gn);
+                      if (gn && isZero(gn->len)) depnode_init(gn); }
+                if (gn && readcore(gn, b, st)) ctx->fs.n_gtf_reads++;
+
+                /* stranded GTF */
+                {
+                    int rs = (c->flag & BAM_FREVERSE) ? 1 : 0;
+                    struct depnode **gsn = rs ? &gr : &gf;
+                    count32_t *gd = rs ? ctx->c_gtf_rev_dep : ctx->c_gtf_fwd_dep;
+                    count32_t *gr2 = rs ? ctx->c_gtf_rev_rmdupdep : ctx->c_gtf_fwd_rmdupdep;
+                    while (*gsn && (*gsn)->stop < c->pos + 1)
+                        { mts_stat_gtf(*gsn, gd, gr2);
+                          struct depnode *cu = *gsn; *gsn = cu->next;
+                          freemem(cu->vals); freemem(cu->cnts);
+                          freemem(cu->rmdupdep); freemem(cu->covdep); freemem(cu);
+                          if (*gsn && isZero((*gsn)->len)) depnode_init(*gsn); }
+                    if (*gsn && readcore(*gsn, b, st)) {
+                        if (rs) ctx->fs.n_gtf_rev_reads++;
+                        else    ctx->fs.n_gtf_fwd_reads++;
+                    }
+                }
+            }
+
+            /* finalize */
+            while (tn) { mts_stat_region(tn, ctx->c_dep, ctx->c_rmdupdep, ctx->c_reg, dc); del_node(tn); }
+            while (fn) { mts_stat_flk(fn, ctx->c_flkdep); del_node(fn); }
+            while (gn) { mts_stat_gtf(gn, ctx->c_gtf_dep, ctx->c_gtf_rmdupdep); del_node(gn); }
+            while (gf) { mts_stat_gtf(gf, ctx->c_gtf_fwd_dep, ctx->c_gtf_fwd_rmdupdep); del_node(gf); }
+            while (gr) { mts_stat_gtf(gr, ctx->c_gtf_rev_dep, ctx->c_gtf_rev_rmdupdep); del_node(gr); }
+        }
+        bam_destroy1(b);
+        bgzf_close(fp);
+        return NULL;
+    }
+
+    /* ---- Sequential-scan mode (fallback) ---- */
     while (bam_read1(fp, b) >= 0) {
         bam1_core_t *c = &b->core;
         if (c->flag & BAM_FSECONDARY || c->flag & BAM_FSUPPLEMENTARY)
@@ -1604,9 +1716,9 @@ static int8_t **mt_partition(const bam_header_t *hdr, regHash_t *h_tgt)
  * Pre-pass MUST have been called first (sets mt_prepass_done).
  */
 static int load_bamfiles_mt(struct opt_aux *f, aux_t *a, bamflag_t *fs,
-                             const bam_index_t *bai)
+                             const bam_index_t *bai, int64_t *chrom_offsets)
 {
-    (void)bai; /* BAI presence validated by caller; workers scan sequentially */
+    (void)bai;
     int t;
     int8_t **mask = mt_partition(a->h, a->h_tgt);
     struct mt_ctx *ctx = calloc(n_threads, sizeof(struct mt_ctx));
@@ -1619,6 +1731,7 @@ static int load_bamfiles_mt(struct opt_aux *f, aux_t *a, bamflag_t *fs,
         ctx[t].h_gtf = a->h_gtf;
         ctx[t].h_gtf_fwd = gtf_stranded ? a->gtf_fwd.h_tgt : NULL;
         ctx[t].h_gtf_rev = gtf_stranded ? a->gtf_rev.h_tgt : NULL;
+        ctx[t].chrom_offsets = chrom_offsets;
         ctx[t].chrom_mask = mask[t];
         ctx[t].n_chrom_total = a->h->n_targets;
         ctx[t].mapQ_lim = f->mapQ_lim;
@@ -3423,19 +3536,29 @@ int bamdst(int argc, char *argv[])
                     errabort("'%s' is not a valid BGZF/BAM file.", bam_path);
                 }
             }
-            /* Light pre-pass: count total reads (no CIGAR walk, no depth). */
+            /* Pre-pass: count global reads + record chromosome offsets. */
             {
+                int n_chr = aux->h->n_targets;
+                int64_t *chrom_offsets = calloc(n_chr, sizeof(int64_t));
                 bamFile pp = bam_open(bam_path, "r");
                 if (!pp) errabort("pre-pass: cannot re-open %s", bam_path);
-                bam_header_t *pp_hdr = bam_header_read(pp); /* skip header */
+                bam_header_t *pp_hdr = bam_header_read(pp);
                 bam_header_destroy(pp_hdr);
                 bam1_t *bb = (bam1_t *)needmem(sizeof(bam1_t));
-                int pp_ret;
+                int pp_ret, last_tid = -1;
+                int64_t cur_pos = bgzf_tell(pp);
                 while ((pp_ret = bam_read1(pp, bb)) >= 0) {
+                    int64_t pos_after = bgzf_tell(pp);
                     bam1_core_t *cc = &bb->core;
                     if (cc->flag & BAM_FSECONDARY ||
                         cc->flag & BAM_FSUPPLEMENTARY)
-                        continue;
+                        { cur_pos = pos_after; continue; }
+                    /* record first-seen offset for each chromosome */
+                    if (cc->tid != last_tid && cc->tid >= 0
+                        && cc->tid < n_chr && chrom_offsets[cc->tid] == 0) {
+                        chrom_offsets[cc->tid] = cur_pos;
+                        last_tid = cc->tid;
+                    }
                     int pp_sf;
                     flagstat(&fs, cc, pp_sf);
                     if (cc->qual >= opt.mapQ_lim) fs.n_qual++;
@@ -3443,12 +3566,22 @@ int bamdst(int argc, char *argv[])
                         if (cc->flag & BAM_FREAD1) fs.n_rmdup1++;
                         if (cc->flag & BAM_FREAD2) fs.n_rmdup2++;
                     }
+                    cur_pos = pos_after;
                 }
                 bam_destroy1(bb);
                 bgzf_close(pp);
                 mt_prepass_done = TRUE;
+
+                if (!bai && chrom_offsets) {
+                    int n_seen = 0;
+                    for (int ci = 0; ci < n_chr; ++ci)
+                        if (chrom_offsets[ci]) n_seen++;
+                    fprintf(stderr, "[bamdst] %d chromosomes indexed "
+                            "(pre-pass).\n", n_seen);
+                }
+                load_bamfiles_mt(&opt, aux, &fs, bai, chrom_offsets);
+                free(chrom_offsets);
             }
-            load_bamfiles_mt(&opt, aux, &fs, bai);
             if (bai) bam_index_destroy((bam_index_t *)bai);
         } else {
             warnings("stdin input: cannot seek; falling back to single-thread");
